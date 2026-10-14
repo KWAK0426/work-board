@@ -6,16 +6,24 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>업무 게시판</title>
   <link rel="stylesheet" href="style.css">
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='1' y='2' width='14' height='12' rx='2' fill='%232f5d8a'/%3E%3Cpath d='M4 6h8M4 9h8M4 12h5' stroke='white' stroke-width='1.4'/%3E%3C/svg%3E">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='1' y='1' width='14' height='14' rx='4' fill='%235b5bd6'/%3E%3Cpath d='M4.5 8.2l2.2 2.2 4.8-4.8' stroke='white' stroke-width='1.6' fill='none' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E">
   <script type="module" src="app.js"></script>
 </head>
 <body>
-  <header class="topbar" id="topbar" hidden>
-    <a class="brand" href="#/calendar">업무 게시판</a>
-    <nav id="nav"></nav>
-    <div class="who"><span id="who"></span><button class="link" id="logout" type="button">로그아웃</button></div>
-  </header>
-  <main id="main"><p class="muted pad">불러오는 중…</p></main>
+  <div class="app" id="app">
+    <aside class="side" id="side" hidden></aside>
+    <div class="side-backdrop" id="side-backdrop" hidden></div>
+    <div class="content">
+      <header class="mobilebar" id="mobilebar" hidden>
+        <button type="button" class="icon-btn" id="menu-btn" aria-label="메뉴 열기">☰</button>
+        <span id="mobile-title"></span>
+      </header>
+      <main id="main"><p class="muted pad">불러오는 중…</p></main>
+    </div>
+    <aside class="peek" id="peek" hidden aria-label="업무 상세"></aside>
+    <button type="button" class="fab" id="fab" hidden aria-label="업무 추가">+</button>
+    <nav class="tabbar" id="tabbar" hidden aria-label="주요 메뉴"></nav>
+  </div>
   <div id="modal-root"></div>
   <div id="toast" class="toast" hidden></div>
 </body>
