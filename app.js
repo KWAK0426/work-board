@@ -50,7 +50,8 @@ const S = {
   collapsed: new Set(store.get('collapsed', [])),
   cal: { month: null, selected: null },
   cand: { currentId: null, skipped: new Set() },
-  peek: null, peekData: null,
+  peek: null, peekData: null, peekKind: null, replyForm: null,
+  mails: [], mailStatus: null,
 };
 const isOwner = () => S.me?.role === 'owner';
 const PROFESSOR_DEFAULT = '김원국 교수님';
@@ -73,6 +74,13 @@ async function staticApi(method, url) {
   if (path === '/api/tasks') return SITE.tasks.map(dec);
   if (path === '/api/projects') return SITE.projects;
   if (path === '/api/activity') return SITE.tasks.flatMap((t) => t.activity).sort((a, b) => b.id - a.id).slice(0, 500);
+  if (path === '/api/mails') return SITE.mails ?? [];
+  const mm = path.match(/^\/api\/mails\/(\d+)$/);
+  if (mm) {
+    const x = (SITE.mails ?? []).find((y) => y.id === Number(mm[1]));
+    if (!x) throw new Error('메일을 찾을 수 없습니다');
+    return x;
+  }
   const m = path.match(/^\/api\/tasks\/(\d+)$/);
   if (m) {
     const t = SITE.tasks.find((x) => x.id === Number(m[1]));
@@ -102,10 +110,18 @@ async function api(method, url, body) {
 }
 
 async function loadAll() {
-  const [tasks, projects] = await Promise.all([api('GET', '/api/tasks'), api('GET', '/api/projects')]);
+  const [tasks, projects, mails] = await Promise.all([api('GET', '/api/tasks'), api('GET', '/api/projects'), api('GET', '/api/mails').catch(() => [])]);
   S.tasks = tasks;
   S.projects = projects;
+  S.mails = mails;
+  if (isOwner() && S.mode !== 'static') S.mailStatus = await api('GET', '/api/mail/status').catch(() => null);
 }
+function upsertMail(m) {
+  const i = S.mails.findIndex((x) => x.id === m.id);
+  if (i >= 0) S.mails[i] = m; else S.mails.unshift(m);
+  if (S.peekKind === 'mail' && S.peek === m.id) S.peekData = m;
+}
+async function reloadTask(id) { if (id) upsertTask(await api('GET', `/api/tasks/${id}`)); }
 function upsertTask(d) {
   const { reviews, activity, ...t } = d;
   const i = S.tasks.findIndex((x) => x.id === t.id);
@@ -115,7 +131,7 @@ async function refreshProjects() { S.projects = await api('GET', '/api/projects'
 async function patchTask(id, body) {
   const d = await api('PATCH', `/api/tasks/${id}`, body);
   upsertTask(d);
-  if (S.peek === id) S.peekData = d;
+  if (S.peekKind === 'task' && S.peek === id) S.peekData = d;
   return d;
 }
 
@@ -226,7 +242,23 @@ function renderLogin() {
     const f = new FormData(e.target);
     try {
       await api('POST', '/api/login', { email: f.get('email'), password: f.get('password') });
-      await boot();
+      await // 서버가 5분마다 메일을 확인하므로, 화면도 1분마다 새 메일이 있는지 본다.
+setInterval(async () => {
+  if (!S.me || S.mode === 'static' || !isOwner() || document.hidden) return;
+  try {
+    const mails = await api('GET', '/api/mails');
+    const known = new Set(S.mails.map((m) => m.id));
+    const fresh = mails.filter((m) => !known.has(m.id));
+    if (!fresh.length) return;
+    S.mails = mails;
+    S.mailStatus = await api('GET', '/api/mail/status').catch(() => S.mailStatus);
+    const busy = main().contains(document.activeElement) && document.activeElement.matches('input, textarea, select');
+    if (!busy) refresh(); else renderSide();
+    toast(`🆕 새 메일 ${fresh.length}건 — ${fresh[0].from_name}`, { action: { label: '열기', fn: () => openMailPeek(fresh[0].id) } });
+  } catch { /* 다음에 다시 */ }
+}, 60000);
+
+boot();
     } catch (err) {
       const el = $('#login-err');
       el.textContent = err.message;
@@ -242,7 +274,8 @@ function renderSide() {
   const todayN = active.filter((t) => effDate(t) && effDate(t) <= S.today).length;
   const mismatchN = active.filter((t) => t.derived.mismatch).length;
   const cands = S.tasks.filter((t) => t.status === 'candidate').length;
-  const item = (page, label, icon, n, cls = '') => html`<a href="#/${page}" class="nav-item ${S.page === page ? 'on' : ''}">
+  const unseenN = S.mails.filter((m) => !m.seen).length;
+  const item = (page, label, icon, n, cls = '', extra = '') => html`<a href="#/${page}" class="nav-item ${extra} ${S.page === page ? 'on' : ''}">
       <span class="ico ico-${icon}" aria-hidden="true"></span><span class="nav-label">${label}</span>${n ? html`<span class="nav-n ${cls}">${n}</span>` : ''}</a>`;
   mount($('#side'), html`
     <div class="side-head">
@@ -253,7 +286,8 @@ function renderSide() {
       ${item('today', '오늘', 'today', todayN, active.some((t) => t.derived.due_flag === 'overdue') ? 'bad' : '')}
       ${item('calendar', '예정', 'cal')}
       ${item('tasks', '전체 업무', 'list', active.length)}
-      ${item('compare', '판단 비교', 'cmp', mismatchN, mismatchN ? 'bad' : '')}
+      ${item('mail', '메일', 'mail', unseenN ? `🆕 ${unseenN}` : 0, 'new')}
+      ${item('compare', '판단 비교', 'cmp', mismatchN, mismatchN ? 'bad' : '', 'keep-phone')}
     </nav>
     <div class="side-sec">
       <div class="side-sec-h"><a href="#/projects" class="${S.page === 'projects' ? 'on' : ''}">프로젝트</a>${owner ? html`<button type="button" class="icon-btn sm" data-action="new-project" aria-label="새 프로젝트" title="새 프로젝트">+</button>` : ''}</div>
@@ -283,9 +317,9 @@ function renderSide() {
 const phoneQuery = matchMedia('(max-width: 760px)');
 const isPhone = () => phoneQuery.matches;
 function renderTabbar() {
-  const tabs = [['today', '오늘', 'today'], ['calendar', '예정', 'cal'], ['tasks', '전체', 'list'], ['compare', '비교', 'cmp']];
+  const tabs = [['today', '오늘', 'today'], ['calendar', '예정', 'cal'], ['tasks', '전체', 'list'], ['mail', '메일', 'mail']];
   const active = activeTasks();
-  const badge = { today: active.filter((t) => effDate(t) && effDate(t) <= S.today).length, compare: active.filter((t) => t.derived.mismatch).length };
+  const badge = { today: active.filter((t) => effDate(t) && effDate(t) <= S.today).length, mail: S.mails.filter((m) => !m.seen).length };
   const inMore = !tabs.some(([k]) => k === S.page);
   mount($('#tabbar'), html`${tabs.map(([k, label, icon]) => html`<a href="#/${k}" class="tab ${S.page === k ? 'on' : ''}">
       <span class="ico ico-${icon}" aria-hidden="true"></span><span>${label}</span>${badge[k] ? html`<span class="tab-n">${badge[k]}</span>` : ''}</a>`)}
@@ -310,7 +344,7 @@ function closeSideMobile() { $('#app').classList.remove('side-open'); $('#side-b
 
 // ---- 라우터 -------------------------------------------------------------------
 const VIEWS = {
-  today: () => renderToday(), calendar: () => renderCalendar(), tasks: () => renderTasks(),
+  today: () => renderToday(), mail: () => renderMail(), calendar: () => renderCalendar(), tasks: () => renderTasks(),
   compare: () => renderCompare(), projects: () => renderProjects(), project: () => renderProject(),
   history: () => renderHistory(), candidates: () => renderCandidates(),
 };
@@ -484,7 +518,7 @@ function taskRow(t) {
   else if (t.next_action && !closed) sub.push(html`<span>→ ${t.next_action}</span>`);
   if (d.self_missing.length) sub.push(html`<span class="tx-warn">${d.self_missing.join(' · ')}</span>`);
   if (d.conflicts.length) sub.push(html`<span class="tx-bad">일정 충돌</span>`);
-  return html`<div class="row ${closed ? 'closed' : ''} ${S.peek === t.id ? 'peeked' : ''}" data-peek="${t.id}" tabindex="0" role="button" aria-label="${t.task_code} ${t.title}">
+  return html`<div class="row ${closed ? 'closed' : ''} ${S.peekKind === 'task' && S.peek === t.id ? 'peeked' : ''}" data-peek="${t.id}" tabindex="0" role="button" aria-label="${t.task_code} ${t.title}">
     ${owner && t.status !== 'dropped'
       ? html`<button type="button" class="check u-${t.my_urgency ?? 'none'} ${t.status === 'done' ? 'done' : ''}" data-done="${t.id}" aria-label="${t.status === 'done' ? '완료 취소' : '완료 처리'}" title="${t.status === 'done' ? '완료 취소' : '완료 처리'}"></button>`
       : html`<span class="check static u-${t.my_urgency ?? 'none'} ${t.status === 'done' ? 'done' : ''}" aria-hidden="true"></span>`}
@@ -568,7 +602,8 @@ function renderToday() {
   const review = pick((t) => t.derived.review_needed && (t.my_urgency === 'super' || t.my_urgency === 'urgent'));
   const unrated = pick((t) => t.derived.self_missing.length > 0);
   const cands = S.tasks.filter((t) => t.status === 'candidate').length;
-  const empty = !used.size;
+  const newMails = S.mails.filter((m) => !m.seen);
+  const empty = !used.size && !newMails.length;
 
   mount(main(), html`
     <div class="page">
@@ -576,6 +611,7 @@ function renderToday() {
       ${quickAddBox()}
       ${isOwner() && cands ? html`<a class="notice" href="#/candidates"><b>등록 후보 ${cands}건</b>이 아직 검토되지 않았습니다. 지금도 필요한 일인지 하나씩 확인하세요 →</a>` : ''}
       ${!isOwner() ? html`<p class="notice subtle">열람 전용입니다. 열람만으로 어떤 업무도 '확인'이나 '승인'으로 바뀌지 않습니다.</p>` : ''}
+      ${groupSection('newmail', '새 메일', newMails, { tone: 'info', hint: '열어서 회신이 필요한지 정하세요' }, mailRow)}
       ${groupSection('overdue', '기한 경과', overdue, { tone: 'bad' })}
       ${groupSection('today', '오늘 마감', today)}
       ${groupSection('follow', '재확인할 날이 된 대기 업무', followUp, { tone: 'warn' })}
@@ -687,7 +723,9 @@ function renderProject() {
 
 // ---- 상세 패널 (오른쪽) ------------------------------------------------------------
 async function openPeek(id) {
+  if (S.peekKind !== 'task') S.peekData = null;
   S.peek = id;
+  S.peekKind = 'task';
   markPeekRow();
   const panel = $('#peek');
   panel.hidden = false;
@@ -704,19 +742,22 @@ async function openPeek(id) {
 function closePeek() {
   S.peek = null;
   S.peekData = null;
+  S.peekKind = null;
+  S.replyForm = null;
   $('#peek').hidden = true;
   $('#app').classList.remove('peek-open');
   markPeekRow();
 }
 function markPeekRow() {
   $$('.row.peeked').forEach((el) => el.classList.remove('peeked'));
-  if (S.peek) $$(`.row[data-peek="${S.peek}"]`).forEach((el) => el.classList.add('peeked'));
+  if (S.peek) $$(`.row[${S.peekKind === 'mail' ? 'data-mail' : 'data-peek'}="${S.peek}"]`).forEach((el) => el.classList.add('peeked'));
 }
 
 const FIELD_LABEL = {
   title: '업무명', description: '업무 목적·범위', expected_deliverable: '예상 산출물', done_criteria: '완료 기준',
   due_undecided_reason: '마감일 미정 사유', my_reason: '판단 이유', external_deadline: '외부 고정 일정',
   external_deadline_source: '외부 일정 출처', next_action: '다음 행동', waiting_on: '대기 대상',
+  mail_told_professor: '교수님께 말씀드림', mail_reply_plan: '회신 내용',
   blocked_reason: '대기/차단 사유', follow_up_date: '재확인일', source_note: '메모', project_id: '프로젝트',
   status: '진행 상태', my_urgency: '내 시급성', my_due_date: '내 마감일', review_state: '검토 상태',
   visibility: '공유', source_type: '출처 유형', review: '확인 기록', objective: '목표',
@@ -738,6 +779,7 @@ function activityText(a) {
 }
 
 function renderPeek() {
+  if (S.peekKind === 'mail') return renderMailPeek();
   const t = S.peekData;
   if (!t) return;
   const panel = $('#peek');
@@ -811,6 +853,7 @@ function renderPeek() {
         ${prop('외부 고정 일정', owner ? html`<div class="pair">${dateIn('external_deadline')}${textIn('external_deadline_source', '출처 (예: 학회 공지)')}</div>` : html`${ro(t.external_deadline, fmtDate)} <span class="muted small">${t.external_deadline_source ?? ''}</span>`)}
       </div>
 
+      ${t.mail ? mailLinkBlock(t.mail) : ''}
       ${sec('content', '업무 내용', html`<div class="props">
           ${prop('목적·범위', owner ? area('description') : ro(t.description))}
           ${prop('예상 산출물', owner ? area('expected_deliverable') : ro(t.expected_deliverable))}
@@ -977,7 +1020,7 @@ function reviewModal(t) {
       upsertTask(d);
       closeModal();
       toast('확인 기록 추가됨');
-      if (S.peek === t.id) { S.peekData = d; renderPeek(); }
+      if (S.peekKind === 'task' && S.peek === t.id) { S.peekData = d; renderPeek(); }
       refresh();
     } catch (err) { toastErr(err); }
   });
@@ -992,10 +1035,11 @@ function shiftMonth(ym, n) {
 // 날짜 → 그날 걸린 일정. 내 마감일과 확인된 기한이 다르면 두 날짜에 각각 표시한다.
 function calendarEvents() {
   const map = new Map();
-  const push = (date, kind, t) => {
+  const push = (date, kind, t, mail = null) => {
     if (!map.has(date)) map.set(date, []);
-    map.get(date).push({ date, kind, t, closed: t.status === 'done' });
+    map.get(date).push({ date, kind, t, mail, closed: t?.status === 'done' });
   };
+  for (const m of S.mails) if (!m.seen) push(m.received_date, 'mail', null, m);
   for (const t of S.tasks) {
     if (t.status === 'candidate' || t.status === 'dropped') continue;
     if (t.my_due_date) push(t.my_due_date, 'mine', t);
@@ -1004,14 +1048,18 @@ function calendarEvents() {
     if (t.external_deadline && t.external_deadline !== t.my_due_date) push(t.external_deadline, 'ext', t);
     if (t.status === 'waiting' && t.follow_up_date) push(t.follow_up_date, 'follow', t);
   }
-  const kr = { mine: 0, other: 1, ext: 2, follow: 3 };
+  const kr = { mail: -1, mine: 0, other: 1, ext: 2, follow: 3 };
   for (const list of map.values()) {
-    list.sort((a, b) => a.closed - b.closed || kr[a.kind] - kr[b.kind] || (URGENCY_RANK[a.t.my_urgency] ?? 9) - (URGENCY_RANK[b.t.my_urgency] ?? 9));
+    list.sort((a, b) => a.closed - b.closed || kr[a.kind] - kr[b.kind] || (URGENCY_RANK[a.t?.my_urgency] ?? 9) - (URGENCY_RANK[b.t?.my_urgency] ?? 9));
   }
   return map;
 }
-const evLate = (e) => !e.closed && ACTIVE_STATUSES.includes(e.t.status) && e.date < S.today && e.kind !== 'follow';
+const evLate = (e) => e.kind !== 'mail' && !e.closed && ACTIVE_STATUSES.includes(e.t.status) && e.date < S.today && e.kind !== 'follow';
 function calChip(e) {
+  if (e.kind === 'mail') {
+    const m = e.mail;
+    return html`<a class="ev k-mail" href="#" data-mail="${m.id}" title="새 메일 · ${m.from_name} · ${m.subject}"><span class="new-emo" aria-label="새 메일">🆕</span>${m.from_name} · ${m.subject}</a>`;
+  }
   const t = e.t;
   const drag = isOwner() && e.kind === 'mine' && !e.closed;
   const prefix = e.kind === 'other' ? '교수님 · ' : e.kind === 'ext' ? '⚑ ' : e.kind === 'follow' ? '↻ ' : '';
@@ -1044,13 +1092,22 @@ function renderCalendar() {
         ${owner ? html`<button type="button" class="cal-add" data-add="${d}" aria-label="${fmtDate(d)}에 업무 추가" title="이 날짜로 새 업무">+</button>` : ''}
       </div>
       <div class="cal-evs">${list.slice(0, 3).map(calChip)}${list.length > 3 ? html`<button type="button" class="more" data-sel="${d}">+${list.length - 3}건 더</button>` : ''}</div>
-      <div class="cal-dots" aria-hidden="true">${list.slice(0, 4).map((e) => html`<i class="dot k-${e.kind} u-${e.t.my_urgency ?? 'none'}"></i>`)}</div>
+      <div class="cal-dots" aria-hidden="true">${list.slice(0, 4).map((e) => html`<i class="dot k-${e.kind} u-${e.t?.my_urgency ?? 'none'}"></i>`)}</div>
     </div>`);
   }
 
   const sel = S.cal.selected;
-  const selList = events.get(sel) ?? [];
+  const selList = [...(events.get(sel) ?? []), ...S.mails.filter((m) => m.seen && m.received_date === sel).map((m) => ({ kind: 'mail', mail: m, date: sel }))];
   const dayItem = (e) => {
+    if (e.kind === 'mail') {
+      const m = e.mail;
+      return html`<a class="day-item" href="#" data-mail="${m.id}">
+        <div class="day-item-top"><span class="ev-kind k-mail">받은 메일</span>${m.seen ? '' : html`<span class="new-emo">🆕</span>`}</div>
+        <div class="day-item-title">${m.subject}</div>
+        <div class="small muted">${m.from_name}</div>
+        <div class="flags">${mailStatusPills(m)}</div>
+      </a>`;
+    }
     const t = e.t;
     return html`<a class="day-item" href="#" data-peek="${t.id}">
       <div class="day-item-top"><span class="ev-kind k-${e.kind}">${KIND_LABEL[e.kind]}</span><span class="muted small">${t.task_code}</span>${evLate(e) ? html`<span class="badge b-bad">기한 경과</span>` : ''}</div>
@@ -1072,7 +1129,7 @@ function renderCalendar() {
         <span class="spacer"></span>
         <div class="legend">
           <span><i class="sw u-super"></i>초시급</span><span><i class="sw u-urgent"></i>시급</span><span><i class="sw u-routine"></i>일상</span>
-          <span><i class="sw k-other"></i>교수님 확인 기한</span><span><i class="sw k-ext"></i>외부 일정</span>
+          <span><i class="sw k-other"></i>교수님 확인 기한</span><span><i class="sw k-ext"></i>외부 일정</span><span><span class="new-emo">🆕</span>새 메일</span>
         </div>
       </header>
       <div class="cal">
@@ -1164,7 +1221,7 @@ function renderCompare() {
   const cmpRow = (t) => {
     const d = t.derived;
     const r = t.latest_review;
-    return html`<div class="row cmp ${S.peek === t.id ? 'peeked' : ''}" data-peek="${t.id}" tabindex="0" role="button" aria-label="${t.task_code} ${t.title}">
+    return html`<div class="row cmp ${S.peekKind === 'task' && S.peek === t.id ? 'peeked' : ''}" data-peek="${t.id}" tabindex="0" role="button" aria-label="${t.task_code} ${t.title}">
       <div class="row-main"><div class="row-title">${t.title}</div><div class="row-sub"><span class="code">${t.task_code}</span><span>${t.project_title}</span>${r ? html`<span>${r.reviewer_name} · ${CHANNEL[r.review_channel]} · ${fmtReviewedAt(r.reviewed_at).slice(5)}</span>` : ''}</div></div>
       <div class="pair-cols">
         <div class="pc"><span class="pc-k">나</span>${urgBadge(t.my_urgency)}<span class="pc-d">${t.my_due_date ? fmtDate(t.my_due_date) : '미정'}</span></div>
@@ -1381,6 +1438,243 @@ function renderCandidates() {
   });
 }
 
+// ---- 메일 -----------------------------------------------------------------------
+function mailState(m) {
+  if (!m.seen) return 'new';
+  if (m.decision === 'reply') return m.replied_at ? 'replied' : 'reply';
+  if (m.decision === 'no_reply') return 'noreply';
+  return 'unsorted';
+}
+function mailStatusPills(m) {
+  const st = mailState(m);
+  const late = st === 'reply' && m.reply_due && m.reply_due < S.today;
+  return html`
+    ${st === 'reply' ? html`<span class="meta due ${late ? 'late' : ''}">회신 ${m.reply_due ? relDate(m.reply_due) : '날짜 미정'}</span>` : ''}
+    ${st === 'reply' || st === 'replied' ? html`<span class="pill ${m.told_professor ? 'ok' : 'need'}">${m.told_professor ? '교수님께 말씀드림' : '교수님 미보고'}</span>` : ''}
+    ${st === 'replied' ? html`<span class="pill ok">회신 완료 ${fmtDate(m.replied_at)}</span>` : ''}
+    ${st === 'unsorted' ? html`<span class="pill need">회신 여부 미정</span>` : ''}
+    ${st === 'noreply' ? html`<span class="meta muted">회신 불필요</span>` : ''}`;
+}
+const mailFileUrl = (m, file, url) => url || `/api/mails/${m.id}/file?name=${encodeURIComponent(file)}`;
+
+function mailRow(m) {
+  const st = mailState(m);
+  const atts = Array.isArray(m.attachments) ? m.attachments.length : 0;
+  return html`<div class="row mail-row ${st === 'new' ? 'unread' : ''} ${S.peekKind === 'mail' && S.peek === m.id ? 'peeked' : ''}" data-mail="${m.id}" tabindex="0" role="button" aria-label="메일 ${m.from_name} ${m.subject}">
+    <span class="mail-ico" aria-hidden="true">${st === 'new' ? html`<span class="new-emo">🆕</span>` : html`<span class="ico ico-mail"></span>`}</span>
+    <div class="row-main">
+      <div class="row-title">${m.subject}</div>
+      <div class="row-sub"><span>${m.from_name}</span><span>${fmtDate(m.received_date)} 수신</span>${atts ? html`<span>첨부 ${atts}</span>` : ''}</div>
+    </div>
+    <div class="row-meta">${mailStatusPills(m)}</div>
+  </div>`;
+}
+
+function mailSetup(st) {
+  if (!st) return '';
+  const err = st.last_sync?.error;
+  if (st.naver && st.google) {
+    return html`${err ? html`<p class="notice bad">마지막 확인 실패: ${err}</p>` : ''}
+      ${st.pending_uploads ? html`<p class="notice subtle">Drive에 아직 올라가지 않은 메일 ${st.pending_uploads}건 — 다음 확인 때 다시 올립니다.</p>` : ''}`;
+  }
+  return html`<section class="setup">
+    <h3>메일 연결 설정</h3>
+    <ol>
+      <li class="${st.naver ? 'done' : ''}"><b>네이버 메일</b> ${st.naver ? html`<span class="tx-ok">✓ ${st.naver.user} · '${st.naver.folder}'</span>` : html`— 네이버 메일 › 환경설정 › POP3/IMAP 설정에서 IMAP을 <b>사용함</b>으로 바꾼 뒤, 터미널에서 <code>npm run connect-naver</code>`}</li>
+      <li class="${st.google ? 'done' : ''}"><b>Google Drive</b> ${st.google ? html`<span class="tx-ok">✓ 연결됨</span>` : st.google_client ? html`— <code>npm run connect-google</code> 실행 후 브라우저에서 허용` : html`— Google Cloud에서 받은 OAuth 클라이언트 JSON을 <code>secrets/google-oauth-client.json</code>으로 저장 → <code>npm run connect-google</code>`}</li>
+    </ol>
+    <p class="hint">연결하면 게시판 서버가 켜져 있는 동안 5분마다 '연구실' 편지함을 확인합니다. Drive를 연결하지 않아도 메일 PDF·첨부는 이 PC에 저장되고 여기서 열 수 있으며, 나중에 연결하면 한꺼번에 올라갑니다.</p>
+    ${err && st.naver ? html`<p class="notice bad">마지막 확인 실패: ${err}</p>` : ''}
+  </section>`;
+}
+
+function renderMail() {
+  const owner = isOwner() && S.mode !== 'static';
+  const st = S.mailStatus;
+  const by = (k) => S.mails.filter((m) => mailState(m) === k);
+  const reply = by('reply').sort((a, b) => ((a.reply_due ?? '9999') < (b.reply_due ?? '9999') ? -1 : 1));
+  const last = st?.last_sync;
+  mount(main(), html`<div class="page">
+    <header class="page-h"><div><h1>메일</h1>
+      <p class="muted">네이버 ${st?.naver ? `'${st.naver.folder}'` : "'연구실'"} 편지함${last ? ` · 마지막 확인 ${fmtTs(last.at).slice(5)}` : ''}${S.mode === 'static' ? ' · 제목·보낸 사람·회신 상태만 공개' : ''}</p></div>
+      ${owner && st?.naver ? html`<button type="button" class="ghost" id="mail-sync">지금 확인</button>` : ''}</header>
+    ${owner ? mailSetup(st) : ''}
+    ${groupSection('new', '새 메일', by('new'), { tone: 'info', hint: '열어서 회신이 필요한지 정하세요' }, mailRow)}
+    ${groupSection('reply', '회신할 메일', reply, { tone: 'warn' }, mailRow)}
+    ${groupSection('unsorted', '회신 여부를 정하지 않은 메일', by('unsorted'), {}, mailRow)}
+    ${groupSection('replied', '회신 완료', by('replied'), { tone: 'ok' }, mailRow)}
+    ${groupSection('noreply', '회신 불필요', by('noreply'), {}, mailRow)}
+    ${!S.mails.length ? html`<div class="empty-state"><b>가져온 메일이 없습니다</b><p class="muted">${owner && !st?.naver ? '위 설정을 마치면 연구실 편지함의 메일이 여기 나타납니다.' : "'연구실' 편지함에 새 메일이 오면 여기 나타납니다."}</p></div>` : ''}
+  </div>`);
+  $('#mail-sync')?.addEventListener('click', syncMailNow);
+}
+
+async function syncMailNow() {
+  const btn = $('#mail-sync');
+  if (btn) { btn.disabled = true; btn.textContent = '확인 중…'; }
+  try {
+    const r = await api('POST', '/api/mail/sync');
+    S.mails = await api('GET', '/api/mails');
+    S.mailStatus = await api('GET', '/api/mail/status');
+    refresh();
+    toast(r.error ? `확인 실패: ${r.error}` : r.added ? `🆕 새 메일 ${r.added}건` : '새 메일 없음', { err: !!r.error });
+  } catch (e) { toastErr(e); refresh(); }
+}
+
+async function openMailPeek(id) {
+  if (S.peekKind !== 'mail' || S.peek !== id) S.replyForm = null;
+  S.peek = id;
+  S.peekKind = 'mail';
+  const panel = $('#peek');
+  panel.hidden = false;
+  $('#app').classList.add('peek-open');
+  try {
+    let m = S.mails.find((x) => x.id === id) ?? await api('GET', `/api/mails/${id}`);
+    if (isOwner() && S.mode !== 'static' && !m.seen) m = await api('POST', `/api/mails/${id}/seen`);
+    if (S.peek !== id) return;
+    upsertMail(m);
+    S.peekData = m;
+    renderMailPeek();
+    refresh();
+  } catch (e) { toastErr(e); closePeek(); }
+}
+
+function mailLinkBlock(m) {
+  const owner = isOwner() && S.mode !== 'static';
+  return html`<div class="mail-link">
+    <div class="mail-link-h"><span class="ico ico-mail" aria-hidden="true"></span><b>연결된 메일</b><span class="muted small">${fmtDate(m.received_date)} 수신</span></div>
+    <a href="#" data-mail="${m.id}" class="mail-link-t">${m.subject}</a>
+    <div class="muted small">${m.from_name}</div>
+    <div class="flags">${mailStatusPills(m)}
+      ${owner && m.pdf_file ? html`<a class="pill file-pill" href="${mailFileUrl(m, m.pdf_file, m.pdf_url)}" target="_blank" rel="noopener">PDF 보기</a>` : ''}</div>
+  </div>`;
+}
+
+function renderMailPeek() {
+  const m = S.peekData;
+  if (!m) return;
+  const panel = $('#peek');
+  const owner = isOwner() && S.mode !== 'static';
+  const st = mailState(m);
+  const task = m.task_id ? S.tasks.find((t) => t.id === m.task_id) : null;
+  const atts = Array.isArray(m.attachments) ? m.attachments : [];
+  const where = (url) => (url ? 'Drive' : '내 PC');
+  const fileLink = (name, url, kind) => html`<a class="file-link" href="${mailFileUrl(m, name, url)}" target="_blank" rel="noopener">
+      <span class="file-kind">${kind}</span><span class="file-name">${name}</span><span class="file-where ${url ? 'drive' : ''}">${where(url)}</span></a>`;
+  const prop = (label, body) => html`<div class="prop"><div class="prop-k">${label}</div><div class="prop-v">${body}</div></div>`;
+  const choice = (name, map, sel) => html`<div class="choices">${Object.entries(map).map(([k, v]) => html`<label class="choice"><input type="radio" name="${name}" value="${k}" ${k === sel ? raw('checked') : ''}><span>${v}</span></label>`)}</div>`;
+
+  let decision = '';
+  if (!owner) {
+    decision = html`<div class="flags">${mailStatusPills(m)}</div>`;
+  } else if (st === 'reply' || st === 'replied') {
+    decision = html`<div class="props">
+      ${prop('회신할 날짜', html`<input type="date" class="inline" data-mf="reply_due" value="${m.reply_due ?? ''}" aria-label="회신할 날짜">`)}
+      ${prop('회신 내용', html`<textarea class="inline" data-mf="reply_plan" rows="3" placeholder="무엇을 답할지" aria-label="회신 내용">${m.reply_plan ?? ''}</textarea>`)}
+      ${prop('교수님께', html`<label class="toggle"><input type="checkbox" data-mf="told_professor" ${m.told_professor ? raw('checked') : ''}> 말씀드렸음</label>
+        ${m.told_professor ? html`<input type="date" class="inline date-sm" data-mf="told_professor_at" value="${m.told_professor_at ?? ''}" aria-label="말씀드린 날짜">` : ''}`)}
+      ${prop('회신', m.replied_at
+        ? html`<span class="pill ok">회신 완료 ${fmtDate(m.replied_at)}</span> <button type="button" class="link small" data-mail-act="unreplied">취소</button>`
+        : html`<button type="button" class="primary sm" data-mail-act="replied">오늘 회신함</button> <a class="small" href="https://mail.naver.com/" target="_blank" rel="noopener">네이버 메일에서 답장 →</a>`)}
+      ${task ? prop('업무', html`<a href="#" data-peek="${task.id}"><span class="code">${task.task_code}</span> ${task.title} →</a>`) : ''}
+    </div>`;
+  } else if (st === 'noreply') {
+    decision = html`<p class="muted">회신이 필요 없는 메일로 표시했습니다. <button type="button" class="link" data-mail-act="undo">되돌리기</button></p>`;
+  } else if (S.replyForm === m.id) {
+    decision = html`<form class="reply-form" id="rf">
+      <div class="field"><label>내 시급성 *</label>${choice('my_urgency', URGENCY, null)}</div>
+      <div class="row2">
+        <div class="field"><label>회신할 날짜 (내 판단)</label><input type="date" name="reply_due"></div>
+        <div class="field"><label>프로젝트</label><select name="project_id">${projectOptions(defaultProjectId())}</select></div>
+      </div>
+      <div class="field"><label>회신 내용 (무엇을 답할지)</label><textarea name="reply_plan" rows="3"></textarea></div>
+      <div class="field"><label>교수님께 말씀드렸나요?</label>${choice('told', { no: '아직', yes: '말씀드렸음' }, 'no')}</div>
+      <p class="hint">PI·외부 연구자 메일은 보통 당일 1차 회신, 오래 걸리면 처리 일정을 먼저 알립니다. 회신 날짜는 내가 먼저 정하고 교수님께 확인하세요.</p>
+      <div class="actions"><button type="button" class="ghost" data-mail-act="cancel">취소</button><button type="submit" class="primary">회신 업무로 등록</button></div>
+    </form>`;
+  } else {
+    decision = html`<div class="decide"><p><b>회신이 필요한 메일인가요?</b></p>
+      <div class="decide-btns"><button type="button" class="primary" data-mail-act="need">회신 필요</button><button type="button" class="ghost" data-mail-act="noreply">회신 불필요</button></div></div>`;
+  }
+
+  mount(panel, html`
+    <div class="peek-head">
+      <span class="muted small">메일 · ${fmtDate(m.received_date)} 수신</span>
+      <span class="spacer"></span>
+      <button type="button" class="icon-btn" data-close-peek aria-label="닫기 (Esc)" title="닫기 (Esc)">✕</button>
+    </div>
+    <div class="peek-body">
+      <h2 class="peek-title">${m.subject}</h2>
+      <div class="mail-from"><b>${m.from_name}</b>${owner && m.from_addr ? html` <span class="muted">&lt;${m.from_addr}&gt;</span>` : ''}
+        ${owner && m.received_at ? html`<span class="muted small">${fmtTs(m.received_at)}</span>` : ''}</div>
+      ${owner && m.cc_addrs ? html`<div class="small muted">참조: ${m.cc_addrs}</div>` : ''}
+      ${owner ? html`<div class="mail-files">
+        ${m.pdf_file ? fileLink(m.pdf_file, m.pdf_url, 'PDF') : html`<p class="small tx-warn">${m.upload_error ?? 'PDF 없음'}</p>`}
+        ${atts.map((a) => fileLink(a.name, a.url, '첨부'))}
+        ${m.drive_folder_url ? html`<a class="small" href="${m.drive_folder_url}" target="_blank" rel="noopener">Drive 폴더 열기 →</a>` : m.upload_state !== 'done' ? html`<span class="hint">Drive 업로드 대기 — 지금은 이 PC의 파일로 열립니다${m.upload_state === 'error' && m.upload_error ? ` (${m.upload_error})` : ''}</span>` : ''}
+      </div>` : ''}
+      <section class="decision"><h3>회신 관리</h3>${decision}</section>
+      ${owner && m.snippet ? html`<details class="more-sec" open><summary>본문 미리보기</summary><p class="snippet">${m.snippet}</p></details>` : ''}
+    </div>`);
+
+  $('#rf', panel)?.addEventListener('submit', submitReplyTask);
+}
+
+async function submitReplyTask(e) {
+  e.preventDefault();
+  const m = S.peekData;
+  const f = Object.fromEntries(new FormData(e.target));
+  if (!f.my_urgency) return toast('내 시급성을 먼저 정하세요', { err: true });
+  try {
+    const r = await api('POST', `/api/mails/${m.id}/reply-task`, {
+      project_id: Number(f.project_id), my_urgency: f.my_urgency, reply_due: f.reply_due || null, reply_plan: f.reply_plan || null,
+      told_professor: f.told === 'yes', told_professor_at: f.told === 'yes' ? S.today : null,
+    });
+    store.set('lastProject', Number(f.project_id));
+    S.replyForm = null;
+    upsertMail(r.mail);
+    await reloadTask(r.task_id);
+    await refreshProjects();
+    renderMailPeek();
+    refresh();
+    const t = S.tasks.find((x) => x.id === r.task_id);
+    toast(`회신 업무 ${t?.task_code ?? ''} 등록됨`, { action: { label: '업무 열기', fn: () => openPeek(r.task_id) } });
+  } catch (err) { toastErr(err); }
+}
+
+async function patchMail(body) {
+  const m = S.peekData;
+  try {
+    const d = await api('PATCH', `/api/mails/${m.id}`, body);
+    upsertMail(d);
+    if (d.task_id) await reloadTask(d.task_id);
+    renderMailPeek();
+    refresh();
+    toast('저장됨');
+  } catch (err) { toastErr(err); renderMailPeek(); }
+}
+
+$('#peek').addEventListener('change', (e) => {
+  const el = e.target.closest('[data-mf]');
+  if (!el || S.peekKind !== 'mail' || !isOwner()) return;
+  const f = el.dataset.mf;
+  const m = S.peekData;
+  if (f === 'told_professor') return patchMail({ told_professor: el.checked, told_professor_at: el.checked ? (m.told_professor_at ?? S.today) : null });
+  const v = el.value.trim() || null;
+  if (v !== (m[f] ?? null)) patchMail({ [f]: v });
+});
+$('#peek').addEventListener('click', (e) => {
+  const a = e.target.closest('[data-mail-act]');
+  if (!a || S.peekKind !== 'mail') return;
+  const act = a.dataset.mailAct;
+  if (act === 'need') { S.replyForm = S.peekData.id; renderMailPeek(); $('#peek input[name="my_urgency"]')?.focus(); }
+  else if (act === 'cancel') { S.replyForm = null; renderMailPeek(); }
+  else if (act === 'noreply') patchMail({ decision: 'no_reply' });
+  else if (act === 'undo') patchMail({ decision: null });
+  else if (act === 'replied') patchMail({ replied_at: S.today });
+  else if (act === 'unreplied') patchMail({ replied_at: null });
+});
+
 // ---- GitHub 게시 ----------------------------------------------------------------
 async function publishNow() {
   if (!confirm('등록 후보를 뺀 모든 업무가 GitHub Pages에 올라가 인터넷에 공개됩니다.\n(메모와 확인 기록의 "들은 내용"은 올라가지 않습니다)\n\n지금 게시할까요?')) return;
@@ -1433,11 +1727,17 @@ document.addEventListener('click', async (e) => {
     } catch (err) { toastErr(err); }
     return;
   }
+  const mailEl = e.target.closest('[data-mail]');
+  if (mailEl) {
+    e.preventDefault();
+    const id = Number(mailEl.dataset.mail);
+    return S.peekKind === 'mail' && S.peek === id && mailEl.classList.contains('row') ? closePeek() : openMailPeek(id);
+  }
   const peek = e.target.closest('[data-peek]');
-  if (peek && !e.target.closest('#peek')) {
+  if (peek) {
     e.preventDefault();
     const id = Number(peek.dataset.peek);
-    return S.peek === id && peek.classList.contains('row') ? closePeek() : openPeek(id);
+    return S.peekKind === 'task' && S.peek === id && peek.classList.contains('row') ? closePeek() : openPeek(id);
   }
   const col = e.target.closest('[data-collapse]');
   if (col) {
@@ -1469,17 +1769,21 @@ document.addEventListener('keydown', (e) => {
   }
   if (typing || e.metaKey || e.ctrlKey || e.altKey || $('#modal-root').innerHTML) return;
   if ((e.key === 'n' || e.key === 'N') && isOwner()) { e.preventDefault(); return focusQuickAdd(); }
-  const rows = $$('#main .row[data-peek]');
+  const rows = $$('#main .row[data-peek], #main .row[data-mail]');
   if (!rows.length) return;
   const i = rows.indexOf(document.activeElement);
   if (e.key === 'j' || e.key === 'ArrowDown') { e.preventDefault(); rows[Math.min(i + 1, rows.length - 1)].focus(); }
   else if (e.key === 'k' || e.key === 'ArrowUp') { e.preventDefault(); rows[Math.max(i - 1, 0)].focus(); }
-  else if ((e.key === 'Enter' || e.key === ' ') && i >= 0) { e.preventDefault(); openPeek(Number(rows[i].dataset.peek)); }
+  else if ((e.key === 'Enter' || e.key === ' ') && i >= 0) { e.preventDefault(); openRow(rows[i]); }
 });
+const openRow = (row) => (row.dataset.mail ? openMailPeek(Number(row.dataset.mail)) : openPeek(Number(row.dataset.peek)));
 // 상세 패널이 열린 채로 목록을 위아래로 옮기면 패널도 따라간다 (Linear의 peek처럼).
 document.addEventListener('focusin', (e) => {
-  const row = e.target.closest?.('#main .row[data-peek]');
-  if (row && S.peek && Number(row.dataset.peek) !== S.peek) openPeek(Number(row.dataset.peek));
+  const row = e.target.closest?.('#main .row[data-peek], #main .row[data-mail]');
+  if (!row || !S.peek) return;
+  const kind = row.dataset.mail ? 'mail' : 'task';
+  const id = Number(row.dataset.mail || row.dataset.peek);
+  if (kind !== S.peekKind || id !== S.peek) openRow(row);
 });
 
 $('#menu-btn').addEventListener('click', openSideMobile);
