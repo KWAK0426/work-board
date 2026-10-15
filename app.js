@@ -34,7 +34,9 @@ function linkLabels(root) {
     label.htmlFor = input.id;
   }
 }
-const mount = (el, tpl) => { el.innerHTML = tpl.s; linkLabels(el); };
+// 종류 색처럼 사용자가 정한 색은 data-ec에 두고 그린 뒤 CSS 변수로 넣는다 (CSP: style 속성 금지)
+function applyColors(root) { for (const el of root.querySelectorAll('[data-ec]')) el.style.setProperty('--ec', el.dataset.ec); }
+const mount = (el, tpl) => { el.innerHTML = tpl.s; linkLabels(el); applyColors(el); };
 
 const store = {
   get(k, d) { try { const v = localStorage.getItem(`wb.${k}`); return v === null ? d : JSON.parse(v); } catch { return d; } },
@@ -51,7 +53,7 @@ const S = {
   cal: { month: null, selected: null },
   cand: { currentId: null, skipped: new Set() },
   peek: null, peekData: null, peekKind: null, replyForm: null,
-  events: [], calDrag: null, calJustDragged: false,
+  events: [], eventTypes: [], calDrag: null, calJustDragged: false,
   mails: [], mailStatus: null, contacts: { categories: [], contacts: [] }, noteOpen: null,
 };
 const isOwner = () => S.me?.role === 'owner';
@@ -77,6 +79,7 @@ async function staticApi(method, url) {
   if (path === '/api/activity') return SITE.tasks.flatMap((t) => t.activity).sort((a, b) => b.id - a.id).slice(0, 500);
   if (path === '/api/mails') return SITE.mails ?? [];
   if (path === '/api/events') return SITE.events ?? [];
+  if (path === '/api/event-types') return SITE.event_types ?? [];
   const mm = path.match(/^\/api\/mails\/(\d+)$/);
   if (mm) {
     const x = (SITE.mails ?? []).find((y) => y.id === Number(mm[1]));
@@ -114,6 +117,7 @@ async function api(method, url, body) {
 async function loadAll() {
   const [tasks, projects, mails, events] = await Promise.all([api('GET', '/api/tasks'), api('GET', '/api/projects'), api('GET', '/api/mails').catch(() => []), api('GET', '/api/events').catch(() => [])]);
   S.events = events;
+  S.eventTypes = await api('GET', '/api/event-types').catch(() => []);
   S.tasks = tasks;
   S.projects = projects;
   S.mails = mails;
@@ -608,9 +612,9 @@ function mailTabs(activeHref) {
 }
 function eventRow(e) {
   return html`<div class="row ev-row" data-event="${e.id}" tabindex="0" role="button" aria-label="일정 ${e.title}">
-    <span class="ev-dot ek-${e.kind}" aria-hidden="true"></span>
+    <span class="ev-dot" data-ec="${typeOf(e).color}" aria-hidden="true"></span>
     <div class="row-main"><div class="row-title">${e.title}</div>
-      <div class="row-sub"><span>${EVENT_KIND[e.kind]}</span><span>${eventWhen(e)}</span>${e.location ? html`<span>${e.location}</span>` : ''}</div></div>
+      <div class="row-sub"><span>${typeOf(e).name}</span><span>${eventWhen(e)}</span>${e.location ? html`<span>${e.location}</span>` : ''}</div></div>
   </div>`;
 }
 
@@ -1063,7 +1067,6 @@ function reviewModal(t) {
 
 // ---- 캘린더 (예정) -------------------------------------------------------------
 const KIND_LABEL = { mine: '내 마감', other: '확인된 기한', ext: '외부 고정 일정', follow: '대기 재확인' };
-const EVENT_KIND = { trip: '출장', conference: '학회·행사', meeting: '회의', personal: '개인', other: '기타' };
 function shiftMonth(ym, n) {
   const [y, m] = ym.split('-').map(Number);
   return new Date(Date.UTC(y, m - 1 + n, 1)).toISOString().slice(0, 7);
@@ -1175,8 +1178,8 @@ function renderCalendar() {
       ${days.map((d, i) => html`<div class="cal-dh ${cls(d, i)}" data-date="${d}">
         <button type="button" class="num" data-sel="${d}" aria-label="${fmtDate(d)}">${Number(d.slice(8))}</button>${mailDots(d, byDate)}
         ${owner ? html`<button type="button" class="cal-add" data-add="${d}" aria-label="${fmtDate(d)}에 새로 만들기" title="이 날짜에 일정·업무 추가">+</button>` : ''}</div>`)}
-      ${placed.filter((p) => p.lane < MAX_LANES).map((p) => html`<a href="#" class="ev-bar k-${p.e.kind} c${p.s + 1} s${p.t - p.s + 1} l${p.lane + 1} ${p.contL ? 'cont-l' : ''} ${p.contR ? 'cont-r' : ''}"
-          data-event="${p.e.id}" title="${EVENT_KIND[p.e.kind]} · ${p.e.title} · ${eventWhen(p.e)}${p.e.location ? ` · ${p.e.location}` : ''}">${p.e.all_day ? '' : html`<b>${p.e.start_time}</b> `}${p.e.title}</a>`)}
+      ${placed.filter((p) => p.lane < MAX_LANES).map((p) => html`<a href="#" class="ev-bar c${p.s + 1} s${p.t - p.s + 1} l${p.lane + 1} ${p.contL ? 'cont-l' : ''} ${p.contR ? 'cont-r' : ''}"
+          data-event="${p.e.id}" data-ec="${typeOf(p.e).color}" title="${typeOf(p.e).name} · ${p.e.title} · ${eventWhen(p.e)}${p.e.location ? ` · ${p.e.location}` : ''}">${p.e.title}</a>`)}
       ${days.map((d, i) => {
         const list = taskMap.get(d) ?? [];
         const more = Math.max(0, list.length - 3) + hidden[i];
@@ -1202,8 +1205,9 @@ function renderCalendar() {
     </a>`;
   };
   const eventItem = (e) => html`<a class="day-item" href="#" data-event="${e.id}">
-      <div class="day-item-top"><span class="ev-kind ek-${e.kind}">${EVENT_KIND[e.kind]}</span><span class="muted small">${eventWhen(e)}</span></div>
-      <div class="day-item-title">${e.title}</div>${e.location ? html`<div class="small muted">${e.location}</div>` : ''}</a>`;
+      <div class="day-item-top"><span class="ev-kind etype" data-ec="${typeOf(e).color}">${typeOf(e).name}</span><span class="muted small">${eventWhen(e)}</span></div>
+      <div class="day-item-title">${e.title}</div>${e.location ? html`<div class="small muted">${e.location}</div>` : ''}
+      ${e.note ? html`<div class="small ev-note">${e.note}</div>` : ''}</a>`;
   const mailItem = (m) => html`<a class="day-item" href="#" data-mail="${m.id}">
       <div class="day-item-top"><span class="md-inline"><i class="md p${mailLevel(m)}"></i></span><span class="ev-kind k-mail">받은 메일</span>${m.seen ? '' : html`<span class="new-emo">🆕</span>`}</div>
       <div class="day-item-title">${m.subject}</div>
@@ -1228,7 +1232,8 @@ function renderCalendar() {
       ${owner ? eventQuickBox() : ''}
       <div class="legend">
         <span class="lg-h">업무</span><span><i class="sw u-super"></i>초시급</span><span><i class="sw u-urgent"></i>시급</span><span><i class="sw u-routine"></i>일상</span><span><i class="sw k-other"></i>교수님 확인 기한</span>
-        <span class="lg-h">일정</span>${Object.entries(EVENT_KIND).map(([k, v]) => html`<span><i class="sw ek-${k}"></i>${v}</span>`)}
+        <span class="lg-h">일정</span>${S.eventTypes.map((t) => html`<span><i class="sw etype-sw" data-ec="${t.color}"></i>${t.name}</span>`)}
+        ${owner ? html`<button type="button" class="link small" data-types-edit>종류·색 편집</button>` : ''}
         <span class="lg-h">메일</span>${legendLevels}
       </div>
       <div class="cal">
@@ -1272,11 +1277,15 @@ function renderCalendar() {
     const add = e.target.closest('[data-add]');
     if (add) { S.cal.selected = add.dataset.add; return createChooser({ date: add.dataset.add }); }
     if (e.target.closest('[data-peek], [data-event], [data-mail]')) return;
+    if (e.target.closest('[data-types-edit]')) return typeManager();
     const cell = e.target.closest('[data-sel], [data-date]');
     if (cell) {
-      S.cal.selected = cell.dataset.sel || cell.dataset.date;
+      const d = cell.dataset.sel || cell.dataset.date;
+      S.cal.selected = d;
       renderCalendar();
-      if (isPhone()) $('.cal-side')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      if (isPhone()) return $('.cal-side')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      // '+N건 더'를 누른 경우는 그날 목록만 본다
+      if (owner && !e.target.closest('.more')) eventModal(null, { start: d });
     }
   });
   if (!owner) return;
@@ -1346,12 +1355,28 @@ document.addEventListener('mouseup', () => {
 });
 
 
-// ---- 캘린더 일정 바로 추가 (한 줄: 이름 + 날짜/기간 + 시간 + @장소) ----
-const EV_KIND_WORDS = [
-  ['trip', /출장|현장|답사|관측|캠페인/],
-  ['conference', /학회|세미나|워크숍|워크샵|심포지엄|포럼|행사|컨퍼런스|발표회|박람회/],
-  ['meeting', /회의|미팅|면담|상담|브리핑|랩미팅|세미|줌|zoom/i],
+// ---- 일정 종류 (이름·색은 사용자가 정함) ----------------------------------------------
+const NO_TYPE = { id: null, name: '종류 없음', color: '#8b90a0' };
+const typeOf = (e) => S.eventTypes.find((t) => t.id === e.type_id) ?? NO_TYPE;
+const TYPE_PALETTE = ['#e5484d', '#f08c00', '#e2b600', '#2b9a5a', '#0f9488', '#2f6fdb', '#5b5bd6', '#8e4ec6', '#c2417a', '#64748b', '#8b90a0'];
+async function reloadEventTypes() { S.eventTypes = await api('GET', '/api/event-types'); }
+// 일정 이름의 낱말로 종류를 짐작 (해당 이름의 종류가 있을 때만)
+const TYPE_WORDS = [
+  [/제출|마감|투고|접수|신청|기한/, ['제출']],
+  [/학회|세미나|워크숍|워크샵|심포지엄|포럼|행사|컨퍼런스|발표회|박람회/, ['학회', '행사']],
+  [/출장|현장|답사|관측|캠페인/, ['출장']],
+  [/회의|미팅|면담|상담|브리핑|랩미팅|zoom|줌/i, ['회의']],
 ];
+function guessType(title) {
+  for (const [re, names] of TYPE_WORDS) {
+    if (!re.test(title)) continue;
+    const t = S.eventTypes.find((x) => names.some((n) => x.name.includes(n)));
+    if (t) return t.id;
+  }
+  return null;
+}
+
+// ---- 캘린더 일정 바로 추가 (한 줄: 제목 + 날짜/기간 + 시간 + @장소) ----
 const pad2 = (n) => String(n).padStart(2, '0');
 function hour24(ap, h) {
   h = Number(h);
@@ -1366,7 +1391,6 @@ function parseEventQuick(text, baseDate) {
   const cut = (m) => { s = s.slice(0, m.index) + ' ' + s.slice(m.index + m[0].length); };
   let m = s.match(/\s@\s?([^@]+?)\s*$/);
   if (m) { out.location = m[1].trim(); cut(m); }
-  // 기간: 10/21~10/22, 10/21~22, 10월 21일~22일
   m = s.match(/(^|\s)(\d{1,2})[/.](\d{1,2})\s*[~\-–]\s*(?:(\d{1,2})[/.])?(\d{1,2})(?:까지)?(?=\s|$)/)
     || s.match(/(^|\s)(\d{1,2})월\s?(\d{1,2})일\s*[~\-–]\s*(?:(\d{1,2})월\s?)?(\d{1,2})일(?:까지)?(?=\s|$)/);
   if (m) {
@@ -1385,7 +1409,6 @@ function parseEventQuick(text, baseDate) {
       if (v) { out.start_date = v; cut(mm); break; }
     }
   }
-  // 시간: 14:00, 14:00~16:00, 오후 2시, 3시~5시, 10시 30분
   m = s.match(/(^|\s)([01]?\d|2[0-3]):([0-5]\d)(?:\s*[~\-–]\s*([01]?\d|2[0-3]):([0-5]\d))?(?:부터|까지)?(?=\s|$)/);
   if (m) {
     out.start_time = `${pad2(m[2])}:${m[3]}`;
@@ -1406,18 +1429,17 @@ function parseEventQuick(text, baseDate) {
     }
   }
   const title = s.replace(/\s+/g, ' ').trim();
-  const kind = EV_KIND_WORDS.find(([, re]) => re.test(title))?.[0] ?? 'other';
   out.start_date ??= baseDate;
   if (!out.end_date || out.end_date < out.start_date) out.end_date = out.start_date;
   if (out.end_time && out.start_date === out.end_date && out.end_time < out.start_time) out.end_time = null;
-  return { title, kind, ...out, all_day: !out.start_time };
+  return { title, type_id: guessType(title), ...out, all_day: !out.start_time };
 }
 window.__parseEventQuick = parseEventQuick; // 브라우저 콘솔 점검용
 
 function eventQuickBox() {
   return html`<form class="qa ev-qa" autocomplete="off">
     <span class="qa-plus" aria-hidden="true">+</span>
-    <input class="ev-qa-input" name="q" placeholder="일정 바로 추가 — 예: 추계 원격탐사학회 10/21~10/22 @부산 벡스코 · 교수님 면담 금요일 14:00" aria-label="일정 바로 추가" enterkeyhint="done">
+    <input class="ev-qa-input" name="q" placeholder="일정 한 줄로 바로 추가 — 예: 추계 원격탐사학회 10/21~10/22 · 논문 제출 마감 11/30 · 교수님 면담 금요일 14:00" aria-label="일정 바로 추가" enterkeyhint="done">
     <div class="qa-chips"></div>
   </form>`;
 }
@@ -1429,20 +1451,21 @@ function bindEventQuick(root) {
   const parse = () => parseEventQuick(input.value, S.cal.selected ?? S.today);
   const preview = () => {
     const r = parse();
+    const ty = S.eventTypes.find((t) => t.id === r.type_id) ?? NO_TYPE;
     form.classList.toggle('typing', input.value.trim().length > 0);
     mount(chips, html`
       <span class="qchip on ek">${r.start_date === r.end_date ? fmtDate(r.start_date) : `${fmtDate(r.start_date)} ~ ${fmtDate(r.end_date)}`}</span>
       <span class="qchip ${r.all_day ? '' : 'on ek'}">${r.all_day ? '하루 종일' : `${r.start_time}${r.end_time ? `~${r.end_time}` : ''}`}</span>
-      <span class="qchip on ek">${EVENT_KIND[r.kind]}</span>
+      <span class="qchip etype" data-ec="${ty.color}">${ty.name}</span>
       ${r.location ? html`<span class="qchip on ek">@ ${r.location}</span>` : ''}
-      <span class="qa-hint">Enter로 추가 · 날짜가 없으면 선택한 날(${fmtDate(S.cal.selected ?? S.today)}) · 기간 10/21~10/22 · 시간 14:00, 오후 2시 · 장소 @장소</span>`);
+      <span class="qa-hint">Enter로 추가 · 날짜가 없으면 선택한 날(${fmtDate(S.cal.selected ?? S.today)}) · 메모는 추가 후 막대를 눌러 적기</span>`);
   };
   input.addEventListener('input', preview);
   input.addEventListener('focus', preview);
   form.addEventListener('submit', async (e) => {
     e.preventDefault();
     const r = parse();
-    if (!r.title) return toast('일정 이름을 입력하세요', { err: true });
+    if (!r.title) return toast('일정 제목을 입력하세요', { err: true });
     try {
       const { id } = await api('POST', '/api/events', r);
       await reloadEvents();
@@ -1451,19 +1474,20 @@ function bindEventQuick(root) {
       refresh();
       $('#main .ev-qa-input')?.focus();
       const created = S.events.find((x) => x.id === id);
-      toast(`일정 추가됨 · ${r.title} · ${eventWhen(created)}`, { action: { label: '수정', fn: () => eventModal(created) } });
+      toast(`일정 추가됨 · ${r.title} · ${eventWhen(created)}`, { action: { label: '메모·수정', fn: () => eventModal(created) } });
     } catch (err) { toastErr(err); }
   });
 }
 
-// ---- 일정 추가·수정 ----
+// ---- 일정 추가·수정 창: 종류 → 핵심 제목 → 기간 → 시간 → 메모 ----
 async function reloadEvents() { S.events = await api('GET', '/api/events'); }
-function eventModal(ev = null, { start = S.today, end = null } = {}) {
+function eventModal(ev = null, { start = S.today, end = null, draft = null } = {}) {
   const owner = isOwner() && S.mode !== 'static';
   if (ev && !owner) {
+    const ty = typeOf(ev);
     const m = openModal(html`<h2>${ev.title}</h2>
       <div class="props">
-        <div class="prop"><div class="prop-k">종류</div><div class="prop-v"><span class="ev-kind ek-${ev.kind}">${EVENT_KIND[ev.kind]}</span></div></div>
+        <div class="prop"><div class="prop-k">종류</div><div class="prop-v"><span class="ev-kind etype" data-ec="${ty.color}">${ty.name}</span></div></div>
         <div class="prop"><div class="prop-k">일시</div><div class="prop-v">${eventWhen(ev)}</div></div>
         ${ev.location ? html`<div class="prop"><div class="prop-k">장소</div><div class="prop-v">${ev.location}</div></div>` : ''}
       </div><div class="actions"><button type="button" class="primary" data-cancel>닫기</button></div>`);
@@ -1471,40 +1495,51 @@ function eventModal(ev = null, { start = S.today, end = null } = {}) {
     return;
   }
   if (!owner) return;
-  const e = ev ?? { title: '', kind: 'other', start_date: start, end_date: end ?? start, all_day: 1, start_time: null, end_time: null, location: '', note: '' };
-  const m = openModal(html`<h2>${ev ? '일정 수정' : '새 일정'}</h2>
+  const e = draft ?? ev ?? { title: '', type_id: null, start_date: start, end_date: end ?? start, all_day: 1, start_time: null, end_time: null, location: '', note: '' };
+  const m = openModal(html`<h2>${ev ? '일정 수정' : '일정 추가'} <span class="muted small">${fmtDate(e.start_date)}${e.end_date !== e.start_date ? ` ~ ${fmtDate(e.end_date)}` : ''}</span></h2>
     <form id="evf" autocomplete="off">
-      <div class="field"><label>일정 이름 *</label><input name="title" required maxlength="200" value="${e.title}" placeholder="예: 추계 원격탐사학회, 청주 현장 출장"></div>
-      <div class="field"><label>종류</label><div class="choices">${Object.entries(EVENT_KIND).map(([k, v]) => html`<label class="choice"><input type="radio" name="kind" value="${k}" ${k === e.kind ? raw('checked') : ''}><span>${v}</span></label>`)}</div></div>
+      <div class="field"><label>종류 <button type="button" class="link small" data-types>종류·색 편집</button></label>
+        <div class="choices type-choices">
+          ${S.eventTypes.map((t) => html`<label class="choice"><input type="radio" name="type_id" value="${t.id}" ${t.id === e.type_id ? raw('checked') : ''}><span class="tchip" data-ec="${t.color}"><i class="tdot"></i>${t.name}</span></label>`)}
+        </div></div>
+      <div class="field"><label>제목 * <span class="muted">— 캘린더에는 이것만 보여요</span></label><input name="title" required maxlength="200" value="${e.title}" placeholder="예: 추계 원격탐사학회, KJRS 논문 제출 마감"></div>
       <div class="row2">
         <div class="field"><label>시작 날짜</label><input type="date" name="start_date" required value="${e.start_date}"></div>
-        <div class="field"><label>종료 날짜</label><input type="date" name="end_date" value="${e.end_date}"></div>
+        <div class="field"><label>종료 날짜 (기간)</label><input type="date" name="end_date" value="${e.end_date}"></div>
       </div>
-      <label class="toggle"><input type="checkbox" name="all_day" ${e.all_day ? raw('checked') : ''}> 하루 종일</label>
-      <div class="row2 ev-times" ${e.all_day ? raw('hidden') : ''}>
-        <div class="field"><label>시작 시간</label><input type="time" name="start_time" step="300" value="${e.start_time ?? ''}"></div>
-        <div class="field"><label>종료 시간</label><input type="time" name="end_time" step="300" value="${e.end_time ?? ''}"></div>
+      <div class="time-line">
+        <label class="toggle"><input type="checkbox" name="all_day" ${e.all_day ? raw('checked') : ''}> 하루 종일</label>
+        <span class="ev-times" ${e.all_day ? raw('hidden') : ''}><input type="time" name="start_time" step="300" value="${e.start_time ?? ''}" aria-label="시작 시간"> ~ <input type="time" name="end_time" step="300" value="${e.end_time ?? ''}" aria-label="종료 시간"></span>
       </div>
-      <div class="field"><label>장소</label><input name="location" maxlength="200" value="${e.location ?? ''}" placeholder="예: 부산 벡스코"></div>
-      <div class="field"><label>메모 (공개 페이지에는 올라가지 않음)</label><textarea name="note" rows="2">${e.note ?? ''}</textarea></div>
+      <div class="field"><label>메모 <span class="muted">— 무엇에 대한 일정인지, 준비할 것·링크 등 (공개 페이지에는 안 보임)</span></label><textarea name="note" rows="4" placeholder="예: 구두발표 15분, 세션 B-2. 발표자료 10/18까지 교수님 검토">${e.note ?? ''}</textarea></div>
+      ${e.location ? html`<div class="field"><label>장소</label><input name="location" maxlength="200" value="${e.location}"></div>` : html`<input type="hidden" name="location" value="">`}
       <div class="actions">${ev ? html`<button type="button" class="ghost danger" data-del>삭제</button><span class="spacer"></span>` : ''}
         <button type="button" class="ghost" data-cancel>취소</button><button class="primary" type="submit">${ev ? '저장' : '추가'}</button></div>
     </form>`);
   const form = $('#evf', m);
   form.title.focus();
-  // 이름에 '학회·출장·회의' 같은 말이 있으면 종류를 자동으로 고른다 (직접 고르면 그대로 둠)
-  let kindTouched = !!ev;
-  $$('input[name="kind"]', form).forEach((r) => r.addEventListener('change', () => { kindTouched = true; }));
+  const typeChecked = () => form.querySelector('input[name="type_id"]:checked');
+  let typeTouched = !!(ev || draft) && !!e.type_id;
+  $$('input[name="type_id"]', form).forEach((r) => r.addEventListener('change', () => { typeTouched = true; }));
   form.title.addEventListener('input', () => {
-    if (kindTouched) return;
-    const k = EV_KIND_WORDS.find(([, re]) => re.test(form.title.value))?.[0];
-    if (k) form.querySelector(`input[name="kind"][value="${k}"]`).checked = true;
+    if (typeTouched) return;
+    const id = guessType(form.title.value);
+    $$('input[name="type_id"]', form).forEach((r) => { r.checked = id !== null && Number(r.value) === id; });
   });
   form.all_day.addEventListener('change', () => {
     $('.ev-times', form).hidden = form.all_day.checked;
     if (!form.all_day.checked && !form.start_time.value) { form.start_time.value = '09:00'; form.end_time.value = '10:00'; }
   });
   form.start_date.addEventListener('change', () => { if (!form.end_date.value || form.end_date.value < form.start_date.value) form.end_date.value = form.start_date.value; });
+  const collect = () => {
+    const f = Object.fromEntries(new FormData(form));
+    return { ...f, type_id: typeChecked() ? Number(typeChecked().value) : null, all_day: !!f.all_day, end_date: f.end_date || f.start_date };
+  };
+  $('[data-types]', m).addEventListener('click', () => {
+    const d = { ...collect(), all_day: form.all_day.checked ? 1 : 0 };
+    closeModal();
+    typeManager({ onClose: () => eventModal(ev, { draft: d }) });
+  });
   $('[data-cancel]', m).addEventListener('click', closeModal);
   $('[data-del]', m)?.addEventListener('click', async () => {
     if (!confirm(`'${ev.title}' 일정을 지울까요?`)) return;
@@ -1512,19 +1547,56 @@ function eventModal(ev = null, { start = S.today, end = null } = {}) {
   });
   form.addEventListener('submit', async (ev2) => {
     ev2.preventDefault();
-    const f = Object.fromEntries(new FormData(form));
-    const body = { ...f, all_day: !!f.all_day, end_date: f.end_date || f.start_date };
+    const body = collect();
     try {
       if (ev) await api('PATCH', `/api/events/${ev.id}`, body);
       else await api('POST', '/api/events', body);
-      store.set('lastKind', f.kind);
       await reloadEvents();
       closeModal();
       if (S.page === 'calendar') { S.cal.selected = body.start_date; S.cal.month = body.start_date.slice(0, 7); }
       refresh();
-      toast(ev ? '일정 저장됨' : `일정 추가됨 · ${eventWhen({ ...body, all_day: body.all_day ? 1 : 0 })}`);
+      toast(ev ? '일정 저장됨' : `일정 추가됨 · ${body.title}`);
     } catch (err) { toastErr(err); }
   });
+}
+
+// ---- 일정 종류·색 편집 ----
+function typeManager({ onClose = null } = {}) {
+  const render = () => {
+    const used = new Set(S.eventTypes.map((t) => t.color));
+    const m = openModal(html`<h2>일정 종류·색</h2>
+      <p class="muted small">캘린더 막대 색이 종류별로 바뀝니다. 이름을 고치면 바로 저장됩니다.</p>
+      <div class="type-list">${S.eventTypes.map((t) => html`<div class="type-row" data-type="${t.id}">
+        <span class="tdot big" data-ec="${t.color}"></span>
+        <input class="inline" data-tname="${t.id}" value="${t.name}" aria-label="종류 이름" maxlength="30">
+        <div class="swatches">${TYPE_PALETTE.map((c) => html`<button type="button" class="swatch ${c === t.color ? 'on' : ''}" data-ec="${c}" data-pick="${t.id}" data-color="${c}" aria-label="색 ${c}"></button>`)}</div>
+        <button type="button" class="icon-btn sm" data-tdel="${t.id}" aria-label="${t.name} 삭제" title="삭제">✕</button>
+      </div>`)}</div>
+      <form class="type-new" id="tnf"><input name="name" maxlength="30" placeholder="새 종류 이름 (예: 심사, 발표, 수업)" required><button class="primary" type="submit">추가</button></form>
+      <div class="actions"><button type="button" class="primary" data-done>완료</button></div>`);
+    const nextColor = TYPE_PALETTE.find((c) => !used.has(c)) ?? TYPE_PALETTE[0];
+    const act = async (fn, msg) => { try { await fn(); await reloadEventTypes(); render(); refresh(); if (msg) toast(msg); } catch (err) { toastErr(err); } };
+    m.addEventListener('click', (e) => {
+      const pk = e.target.closest('[data-pick]');
+      if (pk) return act(() => api('PATCH', `/api/event-types/${pk.dataset.pick}`, { color: pk.dataset.color }));
+      const del = e.target.closest('[data-tdel]');
+      if (del) {
+        const t = S.eventTypes.find((x) => x.id === Number(del.dataset.tdel));
+        if (confirm(`'${t.name}' 종류를 지울까요? 이 종류의 일정은 지워지지 않고 '종류 없음'(회색)이 됩니다.`)) act(() => api('DELETE', `/api/event-types/${t.id}`), '종류 삭제됨');
+        return;
+      }
+      if (e.target.closest('[data-done]')) { closeModal(); if (onClose) onClose(); }
+    });
+    m.addEventListener('change', (e) => {
+      const nm = e.target.closest('[data-tname]');
+      if (nm) act(() => api('PATCH', `/api/event-types/${nm.dataset.tname}`, { name: nm.value }), '이름 저장됨');
+    });
+    $('#tnf', m).addEventListener('submit', (e) => {
+      e.preventDefault();
+      act(() => api('POST', '/api/event-types', { name: e.target.name.value, color: nextColor }), '종류 추가됨');
+    });
+  };
+  render();
 }
 
 // ---- 새로 만들기: 일정 / 업무 ----

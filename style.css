@@ -775,3 +775,30 @@ code { font-family: ui-monospace, Consolas, monospace; font-size: 12px; backgrou
 .pub-toggle { border: 1px solid var(--line-2); background: var(--surface); border-radius: 6px; padding: 3px 8px; font-size: 12px; color: var(--muted); white-space: nowrap; margin-left: 4px; }
 .pub-toggle.on { border-color: #b7e2c7; background: var(--ok-soft); color: var(--ok); font-weight: 600; }
 .hidden-mails { margin: 6px 0 0; }
+
+/* ---- 일정 종류 색 (사용자 지정, --ec) ---- */
+.ev-bar[data-ec] { background: color-mix(in srgb, var(--ec) 15%, #fff); border-left-color: var(--ec); color: color-mix(in srgb, var(--ec) 72%, #000); }
+.etype[data-ec] { background: color-mix(in srgb, var(--ec) 15%, #fff); color: color-mix(in srgb, var(--ec) 70%, #000); }
+.ev-dot[data-ec], .sw.etype-sw, .tdot[data-ec], .swatch[data-ec] { background: var(--ec); }
+.qchip.etype { font-weight: 600; }
+.tchip { display: inline-flex; align-items: center; gap: 6px; }
+.tchip .tdot { width: 9px; height: 9px; border-radius: 3px; background: var(--ec); display: inline-block; }
+.type-choices .choice input:checked + .tchip { border-color: var(--ec); background: color-mix(in srgb, var(--ec) 12%, #fff); color: color-mix(in srgb, var(--ec) 75%, #000); }
+.field > label .link { margin-left: 8px; color: var(--accent); }
+.time-line { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin: -2px 0 12px; }
+.time-line .ev-times { display: inline-flex; align-items: center; gap: 6px; }
+.time-line input[type=time] { width: auto; }
+.ev-note { white-space: pre-wrap; color: #4a4f5c; margin-top: 4px; border-left: 2px solid var(--line-2); padding-left: 6px; }
+.type-list { display: flex; flex-direction: column; gap: 6px; margin: 10px 0 12px; }
+.type-row { display: grid; grid-template-columns: 16px 140px 1fr auto; gap: 8px; align-items: center; }
+.tdot.big { width: 14px; height: 14px; border-radius: 4px; }
+.swatches { display: flex; gap: 4px; flex-wrap: wrap; }
+.swatch { width: 18px; height: 18px; border-radius: 50%; border: 2px solid #fff; box-shadow: 0 0 0 1px var(--line-2); padding: 0; }
+.swatch.on { box-shadow: 0 0 0 2px var(--text); }
+.type-new { display: flex; gap: 8px; }
+.type-new input { flex: 1; }
+@media (max-width: 760px) {
+  .ev-bar[data-ec] { background: var(--ec); }
+  .type-row { grid-template-columns: 16px 1fr auto; }
+  .type-row .swatches { grid-column: 1 / -1; }
+}
