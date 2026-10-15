@@ -51,7 +51,8 @@ const S = {
   cal: { month: null, selected: null },
   cand: { currentId: null, skipped: new Set() },
   peek: null, peekData: null, peekKind: null, replyForm: null,
-  mails: [], mailStatus: null,
+  events: [], calDrag: null, calJustDragged: false,
+  mails: [], mailStatus: null, contacts: { categories: [], contacts: [] }, noteOpen: null,
 };
 const isOwner = () => S.me?.role === 'owner';
 const PROFESSOR_DEFAULT = '김원국 교수님';
@@ -75,6 +76,7 @@ async function staticApi(method, url) {
   if (path === '/api/projects') return SITE.projects;
   if (path === '/api/activity') return SITE.tasks.flatMap((t) => t.activity).sort((a, b) => b.id - a.id).slice(0, 500);
   if (path === '/api/mails') return SITE.mails ?? [];
+  if (path === '/api/events') return SITE.events ?? [];
   const mm = path.match(/^\/api\/mails\/(\d+)$/);
   if (mm) {
     const x = (SITE.mails ?? []).find((y) => y.id === Number(mm[1]));
@@ -110,11 +112,15 @@ async function api(method, url, body) {
 }
 
 async function loadAll() {
-  const [tasks, projects, mails] = await Promise.all([api('GET', '/api/tasks'), api('GET', '/api/projects'), api('GET', '/api/mails').catch(() => [])]);
+  const [tasks, projects, mails, events] = await Promise.all([api('GET', '/api/tasks'), api('GET', '/api/projects'), api('GET', '/api/mails').catch(() => []), api('GET', '/api/events').catch(() => [])]);
+  S.events = events;
   S.tasks = tasks;
   S.projects = projects;
   S.mails = mails;
-  if (isOwner() && S.mode !== 'static') S.mailStatus = await api('GET', '/api/mail/status').catch(() => null);
+  if (isOwner() && S.mode !== 'static') {
+    S.mailStatus = await api('GET', '/api/mail/status').catch(() => null);
+    S.contacts = await api('GET', '/api/contacts').catch(() => S.contacts);
+  }
 }
 function upsertMail(m) {
   const i = S.mails.findIndex((x) => x.id === m.id);
@@ -252,9 +258,11 @@ setInterval(async () => {
     if (!fresh.length) return;
     S.mails = mails;
     S.mailStatus = await api('GET', '/api/mail/status').catch(() => S.mailStatus);
+    S.contacts = await api('GET', '/api/contacts').catch(() => S.contacts);
     const busy = main().contains(document.activeElement) && document.activeElement.matches('input, textarea, select');
     if (!busy) refresh(); else renderSide();
-    toast(`🆕 새 메일 ${fresh.length}건 — ${fresh[0].from_name}`, { action: { label: '열기', fn: () => openMailPeek(fresh[0].id) } });
+    const newPeople = S.contacts.contacts.filter((c) => c.category_id == null).length;
+    toast(`🆕 새 메일 ${fresh.length}건 — ${fresh[0].from_name}${newPeople ? ` · 분류 안 된 사람 ${newPeople}명` : ''}`, { action: { label: '열기', fn: () => openMailPeek(fresh[0].id) } });
   } catch { /* 다음에 다시 */ }
 }, 60000);
 
@@ -275,19 +283,18 @@ function renderSide() {
   const mismatchN = active.filter((t) => t.derived.mismatch).length;
   const cands = S.tasks.filter((t) => t.status === 'candidate').length;
   const unseenN = S.mails.filter((m) => !m.seen).length;
-  const item = (page, label, icon, n, cls = '', extra = '') => html`<a href="#/${page}" class="nav-item ${extra} ${S.page === page ? 'on' : ''}">
+  const item = (page, label, icon, n, cls = '', extra = '', pages = [page]) => html`<a href="#/${page}" class="nav-item ${extra} ${pages.includes(S.page) ? 'on' : ''}">
       <span class="ico ico-${icon}" aria-hidden="true"></span><span class="nav-label">${label}</span>${n ? html`<span class="nav-n ${cls}">${n}</span>` : ''}</a>`;
   mount($('#side'), html`
     <div class="side-head">
       <a class="brand" href="#/calendar"><span class="logo"></span>업무 게시판</a>
     </div>
-    ${owner ? html`<button type="button" class="add-btn" data-action="quick-add"><span class="plus">+</span>업무 추가<kbd>N</kbd></button>` : ''}
+    ${owner && S.mode !== 'static' ? html`<button type="button" class="add-btn" data-action="create"><span class="plus">+</span>새로 만들기</button>` : ''}
     <nav class="nav">
-      ${item('today', '오늘', 'today', todayN, active.some((t) => t.derived.due_flag === 'overdue') ? 'bad' : '')}
-      ${item('calendar', '예정', 'cal')}
-      ${item('tasks', '전체 업무', 'list', active.length)}
-      ${item('mail', '메일', 'mail', unseenN ? `🆕 ${unseenN}` : 0, 'new')}
-      ${item('compare', '판단 비교', 'cmp', mismatchN, mismatchN ? 'bad' : '', 'keep-phone')}
+      ${item('calendar', '캘린더', 'cal')}
+      ${item('today', '할 일', 'list', todayN, active.some((t) => t.derived.due_flag === 'overdue') ? 'bad' : '', '', ['today', 'tasks'])}
+      ${item('mail', '메일', 'mail', unseenN ? `🆕 ${unseenN}` : 0, 'new', '', ['mail', 'contacts'])}
+      ${item('compare', '판단 비교', 'cmp', mismatchN, mismatchN ? 'bad' : '')}
     </nav>
     <div class="side-sec">
       <div class="side-sec-h"><a href="#/projects" class="${S.page === 'projects' ? 'on' : ''}">프로젝트</a>${owner ? html`<button type="button" class="icon-btn sm" data-action="new-project" aria-label="새 프로젝트" title="새 프로젝트">+</button>` : ''}</div>
@@ -317,15 +324,15 @@ function renderSide() {
 const phoneQuery = matchMedia('(max-width: 760px)');
 const isPhone = () => phoneQuery.matches;
 function renderTabbar() {
-  const tabs = [['today', '오늘', 'today'], ['calendar', '예정', 'cal'], ['tasks', '전체', 'list'], ['mail', '메일', 'mail']];
+  const tabs = [['calendar', '캘린더', 'cal', ['calendar']], ['today', '할 일', 'list', ['today', 'tasks']], ['mail', '메일', 'mail', ['mail', 'contacts']], ['compare', '비교', 'cmp', ['compare']]];
   const active = activeTasks();
-  const badge = { today: active.filter((t) => effDate(t) && effDate(t) <= S.today).length, mail: S.mails.filter((m) => !m.seen).length };
-  const inMore = !tabs.some(([k]) => k === S.page);
-  mount($('#tabbar'), html`${tabs.map(([k, label, icon]) => html`<a href="#/${k}" class="tab ${S.page === k ? 'on' : ''}">
+  const badge = { today: active.filter((t) => effDate(t) && effDate(t) <= S.today).length, mail: S.mails.filter((m) => !m.seen).length, compare: active.filter((t) => t.derived.mismatch).length };
+  const inMore = !tabs.some(([, , , pages]) => pages.includes(S.page));
+  mount($('#tabbar'), html`${tabs.map(([k, label, icon, pages]) => html`<a href="#/${k}" class="tab ${pages.includes(S.page) ? 'on' : ''}">
       <span class="ico ico-${icon}" aria-hidden="true"></span><span>${label}</span>${badge[k] ? html`<span class="tab-n">${badge[k]}</span>` : ''}</a>`)}
     <button type="button" class="tab ${inMore ? 'on' : ''}" id="tab-more"><span class="ico ico-more" aria-hidden="true"></span><span>더보기</span></button>`);
   $('#tabbar').hidden = false;
-  $('#fab').hidden = !isOwner();
+  $('#fab').hidden = !isOwner() || S.mode === 'static';
   $('#tab-more').addEventListener('click', openSideMobile);
 }
 function openSideMobile() { $('#app').classList.add('side-open'); $('#side-backdrop').hidden = false; }
@@ -344,7 +351,7 @@ function closeSideMobile() { $('#app').classList.remove('side-open'); $('#side-b
 
 // ---- 라우터 -------------------------------------------------------------------
 const VIEWS = {
-  today: () => renderToday(), mail: () => renderMail(), calendar: () => renderCalendar(), tasks: () => renderTasks(),
+  today: () => renderToday(), mail: () => renderMail(), contacts: () => renderContacts(), calendar: () => renderCalendar(), tasks: () => renderTasks(),
   compare: () => renderCompare(), projects: () => renderProjects(), project: () => renderProject(),
   history: () => renderHistory(), candidates: () => renderCandidates(),
 };
@@ -360,7 +367,7 @@ function route() {
     openPeek(Number(m[2]));
     return;
   }
-  if (!VIEWS[page] || (!isOwner() && page === 'candidates')) page = 'calendar';
+  if (!VIEWS[page] || (!isOwner() && (page === 'candidates' || page === 'contacts'))) page = 'calendar';
   S.page = page;
   S.pageArg = m[2] ?? null;
   closeModal();
@@ -585,6 +592,27 @@ function groupBy(list, by) {
   return groups;
 }
 
+// ---- 페이지 안 탭 (할 일: 오늘/전체, 메일: 받은 메일/보낸 사람) ----------------------------
+function pageTabs(tabs, activeHref) {
+  return html`<nav class="ptabs" aria-label="보기 전환">${tabs.map(([href, label, n, cls]) => html`<a href="${href}" class="ptab ${activeHref === href ? 'on' : ''}">${label}${n ? html`<span class="ptab-n ${cls ?? ''}">${n}</span>` : ''}</a>`)}</nav>`;
+}
+function taskTabs(activeHref) {
+  const active = activeTasks();
+  return pageTabs([['#/today', '오늘', active.filter((t) => effDate(t) && effDate(t) <= S.today).length, active.some((t) => t.derived.due_flag === 'overdue') ? 'bad' : ''], ['#/tasks', '전체', active.length]], activeHref);
+}
+function mailTabs(activeHref) {
+  const tabs = [['#/mail', '받은 메일', S.mails.filter((m) => !m.seen).length, 'new']];
+  if (isOwner() && S.mode !== 'static') tabs.push(['#/contacts', '보낸 사람 우선순위', S.contacts.contacts.filter((c) => c.category_id == null).length, 'warn']);
+  return pageTabs(tabs, activeHref);
+}
+function eventRow(e) {
+  return html`<div class="row ev-row" data-event="${e.id}" tabindex="0" role="button" aria-label="일정 ${e.title}">
+    <span class="ev-dot ek-${e.kind}" aria-hidden="true"></span>
+    <div class="row-main"><div class="row-title">${e.title}</div>
+      <div class="row-sub"><span>${EVENT_KIND[e.kind]}</span><span>${eventWhen(e)}</span>${e.location ? html`<span>${e.location}</span>` : ''}</div></div>
+  </div>`;
+}
+
 // ---- 오늘 -------------------------------------------------------------------
 function renderToday() {
   const active = activeTasks();
@@ -602,15 +630,19 @@ function renderToday() {
   const review = pick((t) => t.derived.review_needed && (t.my_urgency === 'super' || t.my_urgency === 'urgent'));
   const unrated = pick((t) => t.derived.self_missing.length > 0);
   const cands = S.tasks.filter((t) => t.status === 'candidate').length;
-  const newMails = S.mails.filter((m) => !m.seen);
-  const empty = !used.size && !newMails.length;
+  const newMails = S.mails.filter((m) => !m.seen).sort(byPriority);
+  const todayEvents = eventsOn(S.today);
+  const soonEvents = S.events.filter((e) => e.start_date > S.today && e.start_date <= addDaysStr(S.today, 7));
+  const empty = !used.size && !newMails.length && !todayEvents.length && !soonEvents.length;
 
   mount(main(), html`
     <div class="page">
-      <header class="page-h"><div><h1>오늘</h1><p class="muted">${fmtDate(S.today)} · 진행 업무 ${active.length}건</p></div></header>
+      <header class="page-h"><div><h1>할 일</h1><p class="muted">${fmtDate(S.today)} · 진행 업무 ${active.length}건</p></div></header>
+      ${taskTabs('#/today')}
       ${quickAddBox()}
       ${isOwner() && cands ? html`<a class="notice" href="#/candidates"><b>등록 후보 ${cands}건</b>이 아직 검토되지 않았습니다. 지금도 필요한 일인지 하나씩 확인하세요 →</a>` : ''}
       ${!isOwner() ? html`<p class="notice subtle">열람 전용입니다. 열람만으로 어떤 업무도 '확인'이나 '승인'으로 바뀌지 않습니다.</p>` : ''}
+      ${groupSection('evtoday', '오늘 일정', todayEvents, { tone: 'info' }, eventRow)}
       ${groupSection('newmail', '새 메일', newMails, { tone: 'info', hint: '열어서 회신이 필요한지 정하세요' }, mailRow)}
       ${groupSection('overdue', '기한 경과', overdue, { tone: 'bad' })}
       ${groupSection('today', '오늘 마감', today)}
@@ -619,6 +651,7 @@ function renderToday() {
       ${groupSection('soon', '곧 마감 (3일 이내)', soon)}
       ${groupSection('review', '교수님·관계자 확인이 필요한 시급 업무', review, { hint: '내 판단이 맞는지 먼저 확인' })}
       ${groupSection('unrated', '본인 평가가 빠진 업무', unrated, { tone: 'warn', hint: '시급성·마감일을 먼저 스스로 정하세요' })}
+      ${groupSection('evsoon', '다가오는 일정 (7일)', soonEvents, {}, eventRow)}
       ${empty ? html`<div class="empty-state"><div class="empty-ico" aria-hidden="true">✓</div><b>오늘 챙길 업무가 없습니다</b><p class="muted">${active.length ? '다가오는 일정은 예정(캘린더)에서 확인하세요.' : isOwner() ? '위 입력칸에 업무를 추가하거나 등록 후보를 검토하세요.' : '게시된 업무가 아직 없습니다.'}</p></div>` : ''}
     </div>`);
   bindQuickAdd();
@@ -688,7 +721,8 @@ function renderTasks() {
   const cands = S.tasks.filter((t) => t.status === 'candidate').length;
   mount(main(), html`
     <div class="page">
-      <header class="page-h"><div><h1>전체 업무</h1><p class="muted">동그라미 색 = 내 시급성 · 오른쪽 = 교수님 확인 상태와 가장 이른 기한</p></div></header>
+      <header class="page-h"><div><h1>할 일</h1><p class="muted">동그라미 색 = 내 시급성 · 오른쪽 = 교수님 확인 상태와 가장 이른 기한</p></div></header>
+      ${taskTabs('#/tasks')}
       ${quickAddBox()}
       ${listToolbar(S.tasks)}
       ${listBody(S.tasks)}
@@ -1028,18 +1062,18 @@ function reviewModal(t) {
 
 // ---- 캘린더 (예정) -------------------------------------------------------------
 const KIND_LABEL = { mine: '내 마감', other: '확인된 기한', ext: '외부 고정 일정', follow: '대기 재확인' };
+const EVENT_KIND = { trip: '출장', conference: '학회·행사', meeting: '회의', personal: '개인', other: '기타' };
 function shiftMonth(ym, n) {
   const [y, m] = ym.split('-').map(Number);
   return new Date(Date.UTC(y, m - 1 + n, 1)).toISOString().slice(0, 7);
 }
-// 날짜 → 그날 걸린 일정. 내 마감일과 확인된 기한이 다르면 두 날짜에 각각 표시한다.
+// 날짜 → 그날 걸린 업무. 내 마감일과 확인된 기한이 다르면 두 날짜에 각각 표시한다.
 function calendarEvents() {
   const map = new Map();
-  const push = (date, kind, t, mail = null) => {
+  const push = (date, kind, t) => {
     if (!map.has(date)) map.set(date, []);
-    map.get(date).push({ date, kind, t, mail, closed: t?.status === 'done' });
+    map.get(date).push({ date, kind, t, closed: t.status === 'done' });
   };
-  for (const m of S.mails) if (!m.seen) push(m.received_date, 'mail', null, m);
   for (const t of S.tasks) {
     if (t.status === 'candidate' || t.status === 'dropped') continue;
     if (t.my_due_date) push(t.my_due_date, 'mine', t);
@@ -1048,18 +1082,14 @@ function calendarEvents() {
     if (t.external_deadline && t.external_deadline !== t.my_due_date) push(t.external_deadline, 'ext', t);
     if (t.status === 'waiting' && t.follow_up_date) push(t.follow_up_date, 'follow', t);
   }
-  const kr = { mail: -1, mine: 0, other: 1, ext: 2, follow: 3 };
+  const kr = { mine: 0, other: 1, ext: 2, follow: 3 };
   for (const list of map.values()) {
-    list.sort((a, b) => a.closed - b.closed || kr[a.kind] - kr[b.kind] || (URGENCY_RANK[a.t?.my_urgency] ?? 9) - (URGENCY_RANK[b.t?.my_urgency] ?? 9));
+    list.sort((a, b) => a.closed - b.closed || kr[a.kind] - kr[b.kind] || (URGENCY_RANK[a.t.my_urgency] ?? 9) - (URGENCY_RANK[b.t.my_urgency] ?? 9));
   }
   return map;
 }
-const evLate = (e) => e.kind !== 'mail' && !e.closed && ACTIVE_STATUSES.includes(e.t.status) && e.date < S.today && e.kind !== 'follow';
+const evLate = (e) => !e.closed && ACTIVE_STATUSES.includes(e.t.status) && e.date < S.today && e.kind !== 'follow';
 function calChip(e) {
-  if (e.kind === 'mail') {
-    const m = e.mail;
-    return html`<a class="ev k-mail" href="#" data-mail="${m.id}" title="새 메일 · ${m.from_name} · ${m.subject}"><span class="new-emo" aria-label="새 메일">🆕</span>${m.from_name} · ${m.subject}</a>`;
-  }
   const t = e.t;
   const drag = isOwner() && e.kind === 'mine' && !e.closed;
   const prefix = e.kind === 'other' ? '교수님 · ' : e.kind === 'ext' ? '⚑ ' : e.kind === 'follow' ? '↻ ' : '';
@@ -1069,8 +1099,57 @@ function calChip(e) {
       title="${KIND_LABEL[e.kind]} · ${t.task_code} ${t.title}">${prefix}${t.title}${agreed ? html`<span class="ev-ok" aria-label="확인된 기한과 같음">✓</span>` : ''}</a>`;
 }
 
+// ---- 메일 점: 그날 받은 메일의 보낸 사람 1차 분류마다 점 하나 (같은 분류 여러 통이어도 하나) ----
+function mailLevel(m) {
+  if (!S.contacts.categories.length) return 's';
+  const c = S.contacts.contacts.find((x) => x.address === String(m.from_addr ?? '').toLowerCase());
+  if (!c || c.category_id == null) return 'u';
+  const i = S.contacts.categories.findIndex((k) => k.id === c.category_id);
+  return i < 0 ? 'u' : Math.min(i + 1, 6);
+}
+const levelOrder = (l) => (typeof l === 'number' ? l : 99);
+function mailsByDate() {
+  const map = new Map();
+  for (const m of S.mails) {
+    if (!map.has(m.received_date)) map.set(m.received_date, []);
+    map.get(m.received_date).push(m);
+  }
+  return map;
+}
+function mailDots(d, byDate) {
+  const list = byDate.get(d) ?? [];
+  if (!list.length) return '';
+  const levels = [...new Set(list.map(mailLevel))].sort((a, b) => levelOrder(a) - levelOrder(b));
+  const unseen = list.some((m) => !m.seen);
+  const names = levels.map((l) => (l === 'u' ? '미분류' : l === 's' ? '메일' : S.contacts.categories[l - 1]?.name)).join(', ');
+  return html`<span class="mdots" title="메일 ${list.length}건 (${names})${unseen ? ' · 새 메일 있음' : ''}">${levels.map((l) => html`<i class="md p${l}"></i>`)}${unseen ? html`<span class="new-emo">🆕</span>` : ''}</span>`;
+}
+
+// ---- 일정 ----
+const eventsOn = (d) => S.events.filter((e) => e.start_date <= d && e.end_date >= d);
+function eventWhen(e) {
+  const days = e.start_date === e.end_date ? fmtDate(e.start_date) : `${fmtDate(e.start_date)} ~ ${fmtDate(e.end_date)}`;
+  return e.all_day ? days : `${days} ${e.start_time}${e.end_time ? `~${e.end_time}` : ''}`;
+}
+// 한 주 안에서 일정 막대가 겹치지 않게 줄(lane)을 나눈다
+function weekLayout(weekStart) {
+  const weekEnd = addDaysStr(weekStart, 6);
+  const evs = S.events.filter((e) => e.start_date <= weekEnd && e.end_date >= weekStart)
+    .sort((a, b) => a.start_date.localeCompare(b.start_date) || b.end_date.localeCompare(a.end_date) || (a.start_time ?? '').localeCompare(b.start_time ?? ''));
+  const lanes = [];
+  return evs.map((e) => {
+    const s = Math.max(0, daysBetween(weekStart, e.start_date));
+    const t = Math.min(6, daysBetween(weekStart, e.end_date));
+    let lane = lanes.findIndex((l) => l.every(([a, b]) => t < a || s > b));
+    if (lane === -1) { lane = lanes.length; lanes.push([]); }
+    lanes[lane].push([s, t]);
+    return { e, s, t, lane, contL: e.start_date < weekStart, contR: e.end_date > weekEnd };
+  });
+}
+const MAX_LANES = 3;
+
 function renderCalendar() {
-  const owner = isOwner();
+  const owner = isOwner() && S.mode !== 'static';
   if (!S.cal.month) S.cal.month = S.today.slice(0, 7);
   if (!S.cal.selected) S.cal.selected = S.today;
   const [y, mo] = S.cal.month.split('-').map(Number);
@@ -1078,36 +1157,39 @@ function renderCalendar() {
   const firstDow = dowOf(first);
   const daysInMonth = new Date(Date.UTC(y, mo, 0)).getUTCDate();
   const start = addDaysStr(first, -firstDow);
-  const cellCount = Math.ceil((firstDow + daysInMonth) / 7) * 7;
-  const events = calendarEvents();
+  const weeks = Math.ceil((firstDow + daysInMonth) / 7);
+  const taskMap = calendarEvents();
+  const byDate = mailsByDate();
   const undated = activeTasks().filter((t) => !t.my_due_date).sort((a, b) => (URGENCY_RANK[a.my_urgency] ?? 9) - (URGENCY_RANK[b.my_urgency] ?? 9));
 
-  const cells = [];
-  for (let i = 0; i < cellCount; i++) {
-    const d = addDaysStr(start, i);
-    const list = events.get(d) ?? [];
-    cells.push(html`<div class="cal-cell dow-${i % 7} ${d.slice(0, 7) === S.cal.month ? '' : 'out'} ${d === S.today ? 'today' : ''} ${d === S.cal.selected ? 'sel' : ''}" data-date="${d}">
-      <div class="cal-date">
-        <button type="button" class="num" data-sel="${d}" aria-label="${fmtDate(d)} 일정 ${list.length}건">${Number(d.slice(8))}</button>
-        ${owner ? html`<button type="button" class="cal-add" data-add="${d}" aria-label="${fmtDate(d)}에 업무 추가" title="이 날짜로 새 업무">+</button>` : ''}
-      </div>
-      <div class="cal-evs">${list.slice(0, 3).map(calChip)}${list.length > 3 ? html`<button type="button" class="more" data-sel="${d}">+${list.length - 3}건 더</button>` : ''}</div>
-      <div class="cal-dots" aria-hidden="true">${list.slice(0, 4).map((e) => html`<i class="dot k-${e.kind} u-${e.t?.my_urgency ?? 'none'}"></i>`)}</div>
+  const weekRows = [];
+  for (let w = 0; w < weeks; w++) {
+    const ws = addDaysStr(start, w * 7);
+    const days = [0, 1, 2, 3, 4, 5, 6].map((i) => addDaysStr(ws, i));
+    const placed = weekLayout(ws);
+    const hidden = days.map((_, i) => placed.filter((p) => p.lane >= MAX_LANES && p.s <= i && p.t >= i).length);
+    const cls = (d, i) => `c${i + 1} dow-${i} ${d.slice(0, 7) === S.cal.month ? '' : 'out'} ${d === S.today ? 'today' : ''} ${d === S.cal.selected ? 'sel' : ''}`;
+    weekRows.push(html`<div class="wk">
+      ${days.map((d, i) => html`<div class="cal-bg ${cls(d, i)}" data-date="${d}"></div>`)}
+      ${days.map((d, i) => html`<div class="cal-dh ${cls(d, i)}" data-date="${d}">
+        <button type="button" class="num" data-sel="${d}" aria-label="${fmtDate(d)}">${Number(d.slice(8))}</button>${mailDots(d, byDate)}
+        ${owner ? html`<button type="button" class="cal-add" data-add="${d}" aria-label="${fmtDate(d)}에 새로 만들기" title="이 날짜에 일정·업무 추가">+</button>` : ''}</div>`)}
+      ${placed.filter((p) => p.lane < MAX_LANES).map((p) => html`<a href="#" class="ev-bar k-${p.e.kind} c${p.s + 1} s${p.t - p.s + 1} l${p.lane + 1} ${p.contL ? 'cont-l' : ''} ${p.contR ? 'cont-r' : ''}"
+          data-event="${p.e.id}" title="${EVENT_KIND[p.e.kind]} · ${p.e.title} · ${eventWhen(p.e)}${p.e.location ? ` · ${p.e.location}` : ''}">${p.e.all_day ? '' : html`<b>${p.e.start_time}</b> `}${p.e.title}</a>`)}
+      ${days.map((d, i) => {
+        const list = taskMap.get(d) ?? [];
+        const more = Math.max(0, list.length - 3) + hidden[i];
+        return html`<div class="cal-evs c${i + 1}" data-date="${d}">${list.slice(0, 3).map(calChip)}${more ? html`<button type="button" class="more" data-sel="${d}">+${more}건 더</button>` : ''}</div>`;
+      })}
+      ${days.map((d, i) => html`<div class="cal-dots c${i + 1}" data-date="${d}" aria-hidden="true">${(taskMap.get(d) ?? []).slice(0, 4).map((e) => html`<i class="dot k-${e.kind} u-${e.t.my_urgency ?? 'none'}"></i>`)}</div>`)}
     </div>`);
   }
 
   const sel = S.cal.selected;
-  const selList = [...(events.get(sel) ?? []), ...S.mails.filter((m) => m.seen && m.received_date === sel).map((m) => ({ kind: 'mail', mail: m, date: sel }))];
-  const dayItem = (e) => {
-    if (e.kind === 'mail') {
-      const m = e.mail;
-      return html`<a class="day-item" href="#" data-mail="${m.id}">
-        <div class="day-item-top"><span class="ev-kind k-mail">받은 메일</span>${m.seen ? '' : html`<span class="new-emo">🆕</span>`}</div>
-        <div class="day-item-title">${m.subject}</div>
-        <div class="small muted">${m.from_name}</div>
-        <div class="flags">${mailStatusPills(m)}</div>
-      </a>`;
-    }
+  const selEvents = eventsOn(sel);
+  const selMails = (byDate.get(sel) ?? []).slice().sort(byPriority);
+  const selTasks = taskMap.get(sel) ?? [];
+  const taskItem = (e) => {
     const t = e.t;
     return html`<a class="day-item" href="#" data-peek="${t.id}">
       <div class="day-item-top"><span class="ev-kind k-${e.kind}">${KIND_LABEL[e.kind]}</span><span class="muted small">${t.task_code}</span>${evLate(e) ? html`<span class="badge b-bad">기한 경과</span>` : ''}</div>
@@ -1116,6 +1198,17 @@ function renderCalendar() {
       ${e.kind === 'other' ? html`<div class="small muted">내 마감일 ${t.my_due_date ? fmtDate(t.my_due_date) : '미정'} · ${dueDiffText(t.derived.due_diff_days)}</div>` : ''}
     </a>`;
   };
+  const eventItem = (e) => html`<a class="day-item" href="#" data-event="${e.id}">
+      <div class="day-item-top"><span class="ev-kind ek-${e.kind}">${EVENT_KIND[e.kind]}</span><span class="muted small">${eventWhen(e)}</span></div>
+      <div class="day-item-title">${e.title}</div>${e.location ? html`<div class="small muted">${e.location}</div>` : ''}</a>`;
+  const mailItem = (m) => html`<a class="day-item" href="#" data-mail="${m.id}">
+      <div class="day-item-top"><span class="md-inline"><i class="md p${mailLevel(m)}"></i></span><span class="ev-kind k-mail">받은 메일</span>${m.seen ? '' : html`<span class="new-emo">🆕</span>`}</div>
+      <div class="day-item-title">${m.subject}</div>
+      <div class="small muted">${displaySender(m)} ${senderTag(m)}</div>
+      <div class="flags">${mailStatusPills(m)}</div></a>`;
+  const legendLevels = S.contacts.categories.length
+    ? html`${S.contacts.categories.slice(0, 6).map((k, i) => html`<span><i class="md p${i + 1}"></i>${k.name}</span>`)}<span><i class="md pu"></i>미분류</span>`
+    : html`<span><i class="md ps"></i>메일 온 날</span>`;
 
   mount(main(), html`
     <div class="page wide">
@@ -1127,21 +1220,27 @@ function renderCalendar() {
           <button type="button" class="ghost" data-month="1" aria-label="다음 달">›</button>
         </div>
         <span class="spacer"></span>
-        <div class="legend">
-          <span><i class="sw u-super"></i>초시급</span><span><i class="sw u-urgent"></i>시급</span><span><i class="sw u-routine"></i>일상</span>
-          <span><i class="sw k-other"></i>교수님 확인 기한</span><span><i class="sw k-ext"></i>외부 일정</span><span><span class="new-emo">🆕</span>새 메일</span>
-        </div>
+        ${owner ? html`<button type="button" class="primary" data-new-event="${sel}">+ 일정</button>` : ''}
       </header>
+      ${owner ? eventQuickBox() : ''}
+      <div class="legend">
+        <span class="lg-h">업무</span><span><i class="sw u-super"></i>초시급</span><span><i class="sw u-urgent"></i>시급</span><span><i class="sw u-routine"></i>일상</span><span><i class="sw k-other"></i>교수님 확인 기한</span>
+        <span class="lg-h">일정</span>${Object.entries(EVENT_KIND).map(([k, v]) => html`<span><i class="sw ek-${k}"></i>${v}</span>`)}
+        <span class="lg-h">메일</span>${legendLevels}
+      </div>
       <div class="cal">
         <div class="cal-board">
           <div class="cal-week">${WEEK.map((w, i) => html`<div class="cal-dow dow-${i}">${w}</div>`)}</div>
-          <div class="cal-grid">${cells}</div>
+          <div class="cal-weeks">${weekRows}</div>
         </div>
         <aside class="cal-side">
           <section class="side-card">
             <div class="side-day">${Number(sel.slice(5, 7))}월 ${Number(sel.slice(8))}일 ${WEEK[dowOf(sel)]}요일 <span class="muted small">${sel === S.today ? '오늘' : dday(sel)}</span></div>
-            ${selList.length ? html`<div class="day-list">${selList.map(dayItem)}</div>` : html`<p class="muted small">이 날짜에 걸린 업무가 없습니다.</p>`}
-            ${owner ? html`<button type="button" class="dash-btn" data-add="${sel}">+ 이 날짜로 업무 추가</button>` : ''}
+            ${selEvents.length ? html`<h4 class="day-sec">일정</h4><div class="day-list">${selEvents.map(eventItem)}</div>` : ''}
+            ${selTasks.length ? html`<h4 class="day-sec">업무</h4><div class="day-list">${selTasks.map(taskItem)}</div>` : ''}
+            ${selMails.length ? html`<h4 class="day-sec">받은 메일</h4><div class="day-list">${selMails.map(mailItem)}</div>` : ''}
+            ${!selEvents.length && !selTasks.length && !selMails.length ? html`<p class="muted small">이 날짜에는 일정·업무·메일이 없습니다.</p>` : ''}
+            ${owner ? html`<div class="day-adds"><button type="button" class="dash-btn" data-new-event="${sel}">+ 일정</button><button type="button" class="dash-btn" data-new-task="${sel}">+ 업무</button></div>` : ''}
           </section>
           ${undated.length ? html`<section class="side-card">
             <h3>마감일 미정 <span class="muted">${undated.length}</span></h3>
@@ -1154,6 +1253,7 @@ function renderCalendar() {
 
   const root = $('#main .page');
   root.addEventListener('click', (e) => {
+    if (S.calJustDragged) { S.calJustDragged = false; return; }
     const m = e.target.closest('[data-month]');
     if (m) {
       const n = Number(m.dataset.month);
@@ -1161,10 +1261,14 @@ function renderCalendar() {
       if (n === 0) S.cal.selected = S.today;
       return renderCalendar();
     }
+    const ne = e.target.closest('[data-new-event]');
+    if (ne) return eventModal(null, { start: ne.dataset.newEvent });
+    const nt = e.target.closest('[data-new-task]');
+    if (nt) return newTaskModal({ due: nt.dataset.newTask });
     const add = e.target.closest('[data-add]');
-    if (add) { S.cal.selected = add.dataset.add; return newTaskModal({ due: add.dataset.add }); }
-    if (e.target.closest('[data-peek]')) return;
-    const cell = e.target.closest('[data-sel], .cal-cell');
+    if (add) { S.cal.selected = add.dataset.add; return createChooser({ date: add.dataset.add }); }
+    if (e.target.closest('[data-peek], [data-event], [data-mail]')) return;
+    const cell = e.target.closest('[data-sel], [data-date]');
     if (cell) {
       S.cal.selected = cell.dataset.sel || cell.dataset.date;
       renderCalendar();
@@ -1172,7 +1276,24 @@ function renderCalendar() {
     }
   });
   if (!owner) return;
-  // 끌어다 놓기로 내 마감일 변경 (변경 이력에 남음)
+  bindEventQuick(root);
+  // 여러 날을 끌어서 선택 → 그 기간으로 새 일정
+  root.addEventListener('mousedown', (e) => {
+    if (e.button !== 0 || e.target.closest('a, button, input, .ev, .ev-bar')) return;
+    const el = e.target.closest('.cal-weeks [data-date]');
+    if (!el) return;
+    S.calDrag = { a: el.dataset.date, b: el.dataset.date };
+    e.preventDefault();
+  });
+  root.addEventListener('mouseover', (e) => {
+    if (!S.calDrag) return;
+    const el = e.target.closest('.cal-weeks [data-date]');
+    if (!el || el.dataset.date === S.calDrag.b) return;
+    S.calDrag.b = el.dataset.date;
+    const [a, b] = [S.calDrag.a, S.calDrag.b].sort();
+    $$('.cal-bg').forEach((bg) => bg.classList.toggle('in-range', bg.dataset.date >= a && bg.dataset.date <= b));
+  });
+  // 업무 칩 끌어다 놓기로 내 마감일 변경 (변경 이력에 남음)
   root.addEventListener('dragstart', (e) => {
     const chip = e.target.closest('[data-task][draggable="true"]');
     if (!chip) return;
@@ -1182,19 +1303,19 @@ function renderCalendar() {
   });
   root.addEventListener('dragend', () => $$('.dragging, .drop-hover').forEach((el) => el.classList.remove('dragging', 'drop-hover')));
   root.addEventListener('dragover', (e) => {
-    const cell = e.target.closest('.cal-cell');
-    if (!cell) return;
+    const el = e.target.closest('.cal-weeks [data-date]');
+    if (!el) return;
     e.preventDefault();
-    $$('.drop-hover').forEach((el) => el !== cell && el.classList.remove('drop-hover'));
-    cell.classList.add('drop-hover');
+    $$('.drop-hover').forEach((x) => x.classList.remove('drop-hover'));
+    $(`.cal-bg[data-date="${el.dataset.date}"]`)?.classList.add('drop-hover');
   });
   root.addEventListener('drop', async (e) => {
-    const cell = e.target.closest('.cal-cell');
-    if (!cell) return;
+    const el = e.target.closest('.cal-weeks [data-date]');
+    if (!el) return;
     e.preventDefault();
     const id = Number(e.dataTransfer.getData('text/plain'));
     const t = S.tasks.find((x) => x.id === id);
-    const to = cell.dataset.date;
+    const to = el.dataset.date;
     S.cal.selected = to;
     if (!t || t.my_due_date === to) return renderCalendar();
     const from = t.my_due_date;
@@ -1207,6 +1328,220 @@ function renderCalendar() {
       });
     } catch (err) { toastErr(err); renderCalendar(); }
   });
+}
+document.addEventListener('mouseup', () => {
+  const d = S.calDrag;
+  if (!d) return;
+  S.calDrag = null;
+  $$('.cal-bg.in-range').forEach((bg) => bg.classList.remove('in-range'));
+  if (d.a === d.b) return;
+  const [a, b] = [d.a, d.b].sort();
+  S.calJustDragged = true;
+  setTimeout(() => { S.calJustDragged = false; }, 50);
+  eventModal(null, { start: a, end: b });
+});
+
+
+// ---- 캘린더 일정 바로 추가 (한 줄: 이름 + 날짜/기간 + 시간 + @장소) ----
+const EV_KIND_WORDS = [
+  ['trip', /출장|현장|답사|관측|캠페인/],
+  ['conference', /학회|세미나|워크숍|워크샵|심포지엄|포럼|행사|컨퍼런스|발표회|박람회/],
+  ['meeting', /회의|미팅|면담|상담|브리핑|랩미팅|세미|줌|zoom/i],
+];
+const pad2 = (n) => String(n).padStart(2, '0');
+function hour24(ap, h) {
+  h = Number(h);
+  if (ap === '오후' && h < 12) h += 12;
+  if (ap === '오전' && h === 12) h = 0;
+  if (!ap && h >= 1 && h <= 7) h += 12; // '3시 미팅'은 보통 오후
+  return h;
+}
+function parseEventQuick(text, baseDate) {
+  let s = ` ${text} `;
+  const out = { start_date: null, end_date: null, start_time: null, end_time: null, location: null };
+  const cut = (m) => { s = s.slice(0, m.index) + ' ' + s.slice(m.index + m[0].length); };
+  let m = s.match(/\s@\s?([^@]+?)\s*$/);
+  if (m) { out.location = m[1].trim(); cut(m); }
+  // 기간: 10/21~10/22, 10/21~22, 10월 21일~22일
+  m = s.match(/(^|\s)(\d{1,2})[/.](\d{1,2})\s*[~\-–]\s*(?:(\d{1,2})[/.])?(\d{1,2})(?:까지)?(?=\s|$)/)
+    || s.match(/(^|\s)(\d{1,2})월\s?(\d{1,2})일\s*[~\-–]\s*(?:(\d{1,2})월\s?)?(\d{1,2})일(?:까지)?(?=\s|$)/);
+  if (m) {
+    const st = guessYear(+m[2], +m[3]);
+    if (st) {
+      const y = Number(st.slice(0, 4));
+      let en = ymd(y, m[4] ? +m[4] : +m[2], +m[5]);
+      if (en && en < st) en = ymd(y + 1, m[4] ? +m[4] : +m[2], +m[5]);
+      if (en) { out.start_date = st; out.end_date = en; cut(m); }
+    }
+  }
+  if (!out.start_date) {
+    for (const [re, fn] of DATE_RULES) {
+      const mm = s.match(re);
+      const v = mm && fn(mm);
+      if (v) { out.start_date = v; cut(mm); break; }
+    }
+  }
+  // 시간: 14:00, 14:00~16:00, 오후 2시, 3시~5시, 10시 30분
+  m = s.match(/(^|\s)([01]?\d|2[0-3]):([0-5]\d)(?:\s*[~\-–]\s*([01]?\d|2[0-3]):([0-5]\d))?(?:부터|까지)?(?=\s|$)/);
+  if (m) {
+    out.start_time = `${pad2(m[2])}:${m[3]}`;
+    if (m[4]) out.end_time = `${pad2(m[4])}:${m[5]}`;
+    cut(m);
+  } else {
+    m = s.match(/(^|\s)(오전|오후)?\s?(\d{1,2})시(?:\s?(\d{1,2})분|\s?반)?(?:\s*[~\-–]\s*(오전|오후)?\s?(\d{1,2})시(?:\s?(\d{1,2})분|\s?반)?)?(?:부터|까지|에)?(?=\s|$)/);
+    if (m && +m[3] <= 24) {
+      const h1 = hour24(m[2], m[3]);
+      const min1 = /반/.test(m[0].split(/[~\-–]/)[0]) ? 30 : +(m[4] ?? 0);
+      out.start_time = `${pad2(h1)}:${pad2(min1)}`;
+      if (m[6]) {
+        const h2 = hour24(m[5] ?? (h1 >= 12 && +m[6] < 12 ? '오후' : m[2]), m[6]);
+        const min2 = /반/.test(m[0].split(/[~\-–]/)[1] ?? '') ? 30 : +(m[7] ?? 0);
+        out.end_time = `${pad2(h2)}:${pad2(min2)}`;
+      }
+      cut(m);
+    }
+  }
+  const title = s.replace(/\s+/g, ' ').trim();
+  const kind = EV_KIND_WORDS.find(([, re]) => re.test(title))?.[0] ?? 'other';
+  out.start_date ??= baseDate;
+  if (!out.end_date || out.end_date < out.start_date) out.end_date = out.start_date;
+  if (out.end_time && out.start_date === out.end_date && out.end_time < out.start_time) out.end_time = null;
+  return { title, kind, ...out, all_day: !out.start_time };
+}
+window.__parseEventQuick = parseEventQuick; // 브라우저 콘솔 점검용
+
+function eventQuickBox() {
+  return html`<form class="qa ev-qa" autocomplete="off">
+    <span class="qa-plus" aria-hidden="true">+</span>
+    <input class="ev-qa-input" name="q" placeholder="일정 바로 추가 — 예: 추계 원격탐사학회 10/21~10/22 @부산 벡스코 · 교수님 면담 금요일 14:00" aria-label="일정 바로 추가" enterkeyhint="done">
+    <div class="qa-chips"></div>
+  </form>`;
+}
+function bindEventQuick(root) {
+  const form = $('.ev-qa', root);
+  if (!form) return;
+  const input = $('.ev-qa-input', form);
+  const chips = $('.qa-chips', form);
+  const parse = () => parseEventQuick(input.value, S.cal.selected ?? S.today);
+  const preview = () => {
+    const r = parse();
+    form.classList.toggle('typing', input.value.trim().length > 0);
+    mount(chips, html`
+      <span class="qchip on ek">${r.start_date === r.end_date ? fmtDate(r.start_date) : `${fmtDate(r.start_date)} ~ ${fmtDate(r.end_date)}`}</span>
+      <span class="qchip ${r.all_day ? '' : 'on ek'}">${r.all_day ? '하루 종일' : `${r.start_time}${r.end_time ? `~${r.end_time}` : ''}`}</span>
+      <span class="qchip on ek">${EVENT_KIND[r.kind]}</span>
+      ${r.location ? html`<span class="qchip on ek">@ ${r.location}</span>` : ''}
+      <span class="qa-hint">Enter로 추가 · 날짜가 없으면 선택한 날(${fmtDate(S.cal.selected ?? S.today)}) · 기간 10/21~10/22 · 시간 14:00, 오후 2시 · 장소 @장소</span>`);
+  };
+  input.addEventListener('input', preview);
+  input.addEventListener('focus', preview);
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const r = parse();
+    if (!r.title) return toast('일정 이름을 입력하세요', { err: true });
+    try {
+      const { id } = await api('POST', '/api/events', r);
+      await reloadEvents();
+      S.cal.selected = r.start_date;
+      S.cal.month = r.start_date.slice(0, 7);
+      refresh();
+      $('#main .ev-qa-input')?.focus();
+      const created = S.events.find((x) => x.id === id);
+      toast(`일정 추가됨 · ${r.title} · ${eventWhen(created)}`, { action: { label: '수정', fn: () => eventModal(created) } });
+    } catch (err) { toastErr(err); }
+  });
+}
+
+// ---- 일정 추가·수정 ----
+async function reloadEvents() { S.events = await api('GET', '/api/events'); }
+function eventModal(ev = null, { start = S.today, end = null } = {}) {
+  const owner = isOwner() && S.mode !== 'static';
+  if (ev && !owner) {
+    const m = openModal(html`<h2>${ev.title}</h2>
+      <div class="props">
+        <div class="prop"><div class="prop-k">종류</div><div class="prop-v"><span class="ev-kind ek-${ev.kind}">${EVENT_KIND[ev.kind]}</span></div></div>
+        <div class="prop"><div class="prop-k">일시</div><div class="prop-v">${eventWhen(ev)}</div></div>
+        ${ev.location ? html`<div class="prop"><div class="prop-k">장소</div><div class="prop-v">${ev.location}</div></div>` : ''}
+      </div><div class="actions"><button type="button" class="primary" data-cancel>닫기</button></div>`);
+    $('[data-cancel]', m).addEventListener('click', closeModal);
+    return;
+  }
+  if (!owner) return;
+  const e = ev ?? { title: '', kind: 'other', start_date: start, end_date: end ?? start, all_day: 1, start_time: null, end_time: null, location: '', note: '' };
+  const m = openModal(html`<h2>${ev ? '일정 수정' : '새 일정'}</h2>
+    <form id="evf" autocomplete="off">
+      <div class="field"><label>일정 이름 *</label><input name="title" required maxlength="200" value="${e.title}" placeholder="예: 추계 원격탐사학회, 청주 현장 출장"></div>
+      <div class="field"><label>종류</label><div class="choices">${Object.entries(EVENT_KIND).map(([k, v]) => html`<label class="choice"><input type="radio" name="kind" value="${k}" ${k === e.kind ? raw('checked') : ''}><span>${v}</span></label>`)}</div></div>
+      <div class="row2">
+        <div class="field"><label>시작 날짜</label><input type="date" name="start_date" required value="${e.start_date}"></div>
+        <div class="field"><label>종료 날짜</label><input type="date" name="end_date" value="${e.end_date}"></div>
+      </div>
+      <label class="toggle"><input type="checkbox" name="all_day" ${e.all_day ? raw('checked') : ''}> 하루 종일</label>
+      <div class="row2 ev-times" ${e.all_day ? raw('hidden') : ''}>
+        <div class="field"><label>시작 시간</label><input type="time" name="start_time" step="300" value="${e.start_time ?? ''}"></div>
+        <div class="field"><label>종료 시간</label><input type="time" name="end_time" step="300" value="${e.end_time ?? ''}"></div>
+      </div>
+      <div class="field"><label>장소</label><input name="location" maxlength="200" value="${e.location ?? ''}" placeholder="예: 부산 벡스코"></div>
+      <div class="field"><label>메모 (공개 페이지에는 올라가지 않음)</label><textarea name="note" rows="2">${e.note ?? ''}</textarea></div>
+      <div class="actions">${ev ? html`<button type="button" class="ghost danger" data-del>삭제</button><span class="spacer"></span>` : ''}
+        <button type="button" class="ghost" data-cancel>취소</button><button class="primary" type="submit">${ev ? '저장' : '추가'}</button></div>
+    </form>`);
+  const form = $('#evf', m);
+  form.title.focus();
+  // 이름에 '학회·출장·회의' 같은 말이 있으면 종류를 자동으로 고른다 (직접 고르면 그대로 둠)
+  let kindTouched = !!ev;
+  $$('input[name="kind"]', form).forEach((r) => r.addEventListener('change', () => { kindTouched = true; }));
+  form.title.addEventListener('input', () => {
+    if (kindTouched) return;
+    const k = EV_KIND_WORDS.find(([, re]) => re.test(form.title.value))?.[0];
+    if (k) form.querySelector(`input[name="kind"][value="${k}"]`).checked = true;
+  });
+  form.all_day.addEventListener('change', () => {
+    $('.ev-times', form).hidden = form.all_day.checked;
+    if (!form.all_day.checked && !form.start_time.value) { form.start_time.value = '09:00'; form.end_time.value = '10:00'; }
+  });
+  form.start_date.addEventListener('change', () => { if (!form.end_date.value || form.end_date.value < form.start_date.value) form.end_date.value = form.start_date.value; });
+  $('[data-cancel]', m).addEventListener('click', closeModal);
+  $('[data-del]', m)?.addEventListener('click', async () => {
+    if (!confirm(`'${ev.title}' 일정을 지울까요?`)) return;
+    try { await api('DELETE', `/api/events/${ev.id}`); await reloadEvents(); closeModal(); refresh(); toast('일정 삭제됨'); } catch (err) { toastErr(err); }
+  });
+  form.addEventListener('submit', async (ev2) => {
+    ev2.preventDefault();
+    const f = Object.fromEntries(new FormData(form));
+    const body = { ...f, all_day: !!f.all_day, end_date: f.end_date || f.start_date };
+    try {
+      if (ev) await api('PATCH', `/api/events/${ev.id}`, body);
+      else await api('POST', '/api/events', body);
+      store.set('lastKind', f.kind);
+      await reloadEvents();
+      closeModal();
+      if (S.page === 'calendar') { S.cal.selected = body.start_date; S.cal.month = body.start_date.slice(0, 7); }
+      refresh();
+      toast(ev ? '일정 저장됨' : `일정 추가됨 · ${eventWhen({ ...body, all_day: body.all_day ? 1 : 0 })}`);
+    } catch (err) { toastErr(err); }
+  });
+}
+
+// ---- 새로 만들기: 일정 / 업무 ----
+function createChooser({ date = null } = {}) {
+  if (!isOwner() || S.mode === 'static') return;
+  closeSideMobile();
+  const m = openModal(html`<div class="sheet-h"><h2>새로 만들기${date ? html` <span class="muted small">${fmtDate(date)}</span>` : ''}</h2><button type="button" class="icon-btn" data-cancel aria-label="닫기">✕</button></div>
+    <div class="chooser">
+      <button type="button" class="choose-card" data-make="event"><span class="ico ico-cal" aria-hidden="true"></span><b>일정</b><span>출장·학회·회의처럼 날짜·기간·시간이 정해진 일</span><kbd>E</kbd></button>
+      <button type="button" class="choose-card" data-make="task"><span class="ico ico-list" aria-hidden="true"></span><b>업무</b><span>해야 할 일 — 내 시급성·마감일을 먼저 정하고 교수님 판단과 비교</span><kbd>N</kbd></button>
+    </div>`);
+  m.classList.add('sheet');
+  $('[data-cancel]', m).addEventListener('click', closeModal);
+  $$('[data-make]', m).forEach((b) => b.addEventListener('click', () => {
+    closeModal();
+    if (b.dataset.make === 'event') return eventModal(null, { start: date ?? S.today });
+    if (date) return newTaskModal({ due: date });
+    if (isPhone()) return quickAddSheet();
+    const qa = $('#main .qa-input');
+    if (qa) { qa.focus(); qa.scrollIntoView({ block: 'center' }); } else newTaskModal();
+  }));
 }
 
 // ---- 판단 비교 ----------------------------------------------------------------
@@ -1464,7 +1799,7 @@ function mailRow(m) {
     <span class="mail-ico" aria-hidden="true">${st === 'new' ? html`<span class="new-emo">🆕</span>` : html`<span class="ico ico-mail"></span>`}</span>
     <div class="row-main">
       <div class="row-title">${m.subject}</div>
-      <div class="row-sub"><span>${m.from_name}</span><span>${fmtDate(m.received_date)} 수신</span>${atts ? html`<span>첨부 ${atts}</span>` : ''}</div>
+      <div class="row-sub"><span>${displaySender(m)}</span>${senderTag(m)}<span>${fmtDate(m.received_date)} 수신</span>${atts ? html`<span>첨부 ${atts}</span>` : ''}</div>
     </div>
     <div class="row-meta">${mailStatusPills(m)}</div>
   </div>`;
@@ -1473,19 +1808,37 @@ function mailRow(m) {
 function mailSetup(st) {
   if (!st) return '';
   const err = st.last_sync?.error;
-  if (st.naver && st.google) {
+  if (st.naver && (st.google || st.drive_desktop)) {
     return html`${err ? html`<p class="notice bad">마지막 확인 실패: ${err}</p>` : ''}
       ${st.pending_uploads ? html`<p class="notice subtle">Drive에 아직 올라가지 않은 메일 ${st.pending_uploads}건 — 다음 확인 때 다시 올립니다.</p>` : ''}`;
   }
   return html`<section class="setup">
     <h3>메일 연결 설정</h3>
     <ol>
-      <li class="${st.naver ? 'done' : ''}"><b>네이버 메일</b> ${st.naver ? html`<span class="tx-ok">✓ ${st.naver.user} · '${st.naver.folder}'</span>` : html`— 네이버 메일 › 환경설정 › POP3/IMAP 설정에서 IMAP을 <b>사용함</b>으로 바꾼 뒤, 터미널에서 <code>npm run connect-naver</code>`}</li>
-      <li class="${st.google ? 'done' : ''}"><b>Google Drive</b> ${st.google ? html`<span class="tx-ok">✓ 연결됨</span>` : st.google_client ? html`— <code>npm run connect-google</code> 실행 후 브라우저에서 허용` : html`— Google Cloud에서 받은 OAuth 클라이언트 JSON을 <code>secrets/google-oauth-client.json</code>으로 저장 → <code>npm run connect-google</code>`}</li>
+      <li class="${st.naver ? 'done' : ''}"><b>네이버 메일</b> ${st.naver ? html`<span class="tx-ok">✓ ${st.naver.user} · '${st.naver.folder}'</span>` : html`— 아래 순서대로 하세요`}
+        ${st.naver ? '' : naverConnectForm()}</li>
+      <li class="${st.google || st.drive_desktop ? 'done' : ''}"><b>Google Drive</b> ${st.drive_desktop && !st.google ? html`<span class="tx-ok">✓ Drive 데스크톱 앱 사용 — ${st.drive_desktop} › 업무게시판 메일</span>` : st.google ? html`<span class="tx-ok">✓ 연결됨</span>` : st.google_client ? html`— <code>npm run connect-google</code> 실행 후 브라우저에서 허용` : html`— Google Cloud에서 받은 OAuth 클라이언트 JSON을 <code>secrets/google-oauth-client.json</code>으로 저장 → <code>npm run connect-google</code>`}</li>
     </ol>
     <p class="hint">연결하면 게시판 서버가 켜져 있는 동안 5분마다 '연구실' 편지함을 확인합니다. Drive를 연결하지 않아도 메일 PDF·첨부는 이 PC에 저장되고 여기서 열 수 있으며, 나중에 연결하면 한꺼번에 올라갑니다.</p>
     ${err && st.naver ? html`<p class="notice bad">마지막 확인 실패: ${err}</p>` : ''}
   </section>`;
+}
+
+function naverConnectForm() {
+  if (S.mode !== 'local') return html`<p class="hint">이 PC에서 실행 중인 게시판에서만 연결할 수 있습니다.</p>`;
+  return html`<div class="naver-steps">
+    <p class="small">① <a href="https://mail.naver.com/" target="_blank" rel="noopener">네이버 메일</a> › 환경설정 › <b>POP3/IMAP 설정</b> › IMAP/SMTP 사용 <b>사용함</b>
+      <br>② <a href="https://nid.naver.com/" target="_blank" rel="noopener">네이버 내정보</a> › 보안설정 › 2단계 인증 › <b>애플리케이션 비밀번호 관리</b>에서 새 비밀번호 생성 (종류: 메일)
+      <br>③ 아래에 입력 — <b>네이버 로그인 비밀번호는 넣지 마세요</b></p>
+    <form class="naver-form" id="naver-form" autocomplete="off">
+      <div class="row3">
+        <div class="field"><label>네이버 ID</label><input name="user" placeholder="abc 또는 abc@naver.com" autocomplete="off" required></div>
+        <div class="field"><label>애플리케이션 비밀번호</label><input name="pass" type="password" autocomplete="new-password" required></div>
+        <div class="field"><label>편지함</label><input name="folder" value="연구실"></div>
+      </div>
+      <button type="submit" class="primary">로그인 시험 후 저장</button>
+      <span class="hint">비밀번호는 이 PC의 Windows 계정으로 암호화해 저장하며, 게시판은 '연구실' 편지함을 읽기만 합니다.</span>
+    </form></div>`;
 }
 
 function renderMail() {
@@ -1497,16 +1850,41 @@ function renderMail() {
   mount(main(), html`<div class="page">
     <header class="page-h"><div><h1>메일</h1>
       <p class="muted">네이버 ${st?.naver ? `'${st.naver.folder}'` : "'연구실'"} 편지함${last ? ` · 마지막 확인 ${fmtTs(last.at).slice(5)}` : ''}${S.mode === 'static' ? ' · 제목·보낸 사람·회신 상태만 공개' : ''}</p></div>
-      ${owner && st?.naver ? html`<button type="button" class="ghost" id="mail-sync">지금 확인</button>` : ''}</header>
+      ${owner && st?.naver ? html`<div class="row-btns"><button type="button" class="ghost" id="mail-sync">지금 확인</button>${S.mode === 'local' ? html`<button type="button" class="link small" id="naver-off">연결 해제</button>` : ''}</div>` : ''}</header>
+    ${mailTabs('#/mail')}
     ${owner ? mailSetup(st) : ''}
-    ${groupSection('new', '새 메일', by('new'), { tone: 'info', hint: '열어서 회신이 필요한지 정하세요' }, mailRow)}
+    ${groupSection('new', '새 메일', by('new').sort(byPriority), { tone: 'info', hint: '보낸 사람 우선순위 순' }, mailRow)}
     ${groupSection('reply', '회신할 메일', reply, { tone: 'warn' }, mailRow)}
-    ${groupSection('unsorted', '회신 여부를 정하지 않은 메일', by('unsorted'), {}, mailRow)}
+    ${groupSection('unsorted', '회신 여부를 정하지 않은 메일', by('unsorted').sort(byPriority), { hint: '보낸 사람 우선순위 순' }, mailRow)}
     ${groupSection('replied', '회신 완료', by('replied'), { tone: 'ok' }, mailRow)}
     ${groupSection('noreply', '회신 불필요', by('noreply'), {}, mailRow)}
     ${!S.mails.length ? html`<div class="empty-state"><b>가져온 메일이 없습니다</b><p class="muted">${owner && !st?.naver ? '위 설정을 마치면 연구실 편지함의 메일이 여기 나타납니다.' : "'연구실' 편지함에 새 메일이 오면 여기 나타납니다."}</p></div>` : ''}
   </div>`);
   $('#mail-sync')?.addEventListener('click', syncMailNow);
+  $('#naver-off')?.addEventListener('click', async () => {
+    if (!confirm('네이버 메일 연결을 해제할까요? 저장된 암호화 비밀번호가 이 PC에서 삭제됩니다. 이미 가져온 메일은 그대로 남습니다.')) return;
+    try { await api('DELETE', '/api/mail/naver'); S.mailStatus = await api('GET', '/api/mail/status'); refresh(); toast('연결 해제됨'); } catch (e) { toastErr(e); }
+  });
+  $('#naver-form')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const form = e.target;
+    const btn = form.querySelector('button[type=submit]');
+    btn.disabled = true;
+    btn.textContent = '로그인 시험 중…';
+    const body = { user: form.user.value, pass: form.pass.value, folder: form.folder.value };
+    form.pass.value = '';
+    try {
+      const r = await api('POST', '/api/mail/naver', body);
+      S.mailStatus = await api('GET', '/api/mail/status');
+      refresh();
+      toast(`연결 완료: ${r.user} · '${r.folder}' — 메일을 가져오는 중입니다`);
+      setTimeout(async () => { try { S.mails = await api('GET', '/api/mails'); S.mailStatus = await api('GET', '/api/mail/status'); refresh(); } catch { /* 다음에 */ } }, 15000);
+    } catch (err) {
+      toastErr(err);
+      btn.disabled = false;
+      btn.textContent = '로그인 시험 후 저장';
+    }
+  });
 }
 
 async function syncMailNow() {
@@ -1516,7 +1894,9 @@ async function syncMailNow() {
     const r = await api('POST', '/api/mail/sync');
     S.mails = await api('GET', '/api/mails');
     S.mailStatus = await api('GET', '/api/mail/status');
+    S.contacts = await api('GET', '/api/contacts');
     refresh();
+    if (r.new_contacts) setTimeout(() => toast(`새로 메일을 보낸 사람 ${r.new_contacts}명 — 우선순위를 정해 주세요`, { action: { label: '정하기', fn: () => { location.hash = '#/contacts'; } } }), 2200);
     toast(r.error ? `확인 실패: ${r.error}` : r.added ? `🆕 새 메일 ${r.added}건` : '새 메일 없음', { err: !!r.error });
   } catch (e) { toastErr(e); refresh(); }
 }
@@ -1605,8 +1985,9 @@ function renderMailPeek() {
     </div>
     <div class="peek-body">
       <h2 class="peek-title">${m.subject}</h2>
-      <div class="mail-from"><b>${m.from_name}</b>${owner && m.from_addr ? html` <span class="muted">&lt;${m.from_addr}&gt;</span>` : ''}
+      <div class="mail-from"><b>${displaySender(m)}</b>${owner ? senderTag(m) : ''}${owner && m.from_addr ? html` <span class="muted">&lt;${m.from_addr}&gt;</span>` : ''}
         ${owner && m.received_at ? html`<span class="muted small">${fmtTs(m.received_at)}</span>` : ''}</div>
+      ${owner ? senderNote(m) : ''}
       ${owner && m.cc_addrs ? html`<div class="small muted">참조: ${m.cc_addrs}</div>` : ''}
       ${owner ? html`<div class="mail-files">
         ${m.pdf_file ? fileLink(m.pdf_file, m.pdf_url, 'PDF') : html`<p class="small tx-warn">${m.upload_error ?? 'PDF 없음'}</p>`}
@@ -1675,6 +2056,178 @@ $('#peek').addEventListener('click', (e) => {
   else if (act === 'unreplied') patchMail({ replied_at: null });
 });
 
+// ---- 보낸 사람 우선순위 ----------------------------------------------------------
+// 1차: 분류 순서(위일수록 우선) → 2차: 분류 안의 사람 순서. 사용자가 정한 값만 쓴다.
+function contactsInCat(catId) {
+  return S.contacts.contacts.filter((c) => c.category_id === catId).sort((a, b) => a.rank - b.rank);
+}
+function senderInfo(addr) {
+  const c = S.contacts.contacts.find((x) => x.address === String(addr ?? '').toLowerCase());
+  if (!c) return null;
+  if (c.category_id == null) return { label: '새 사람 · 분류 필요', cls: 'new', key: [999, 999] };
+  const ci = S.contacts.categories.findIndex((k) => k.id === c.category_id);
+  const pos = contactsInCat(c.category_id).findIndex((x) => x.id === c.id) + 1;
+  return { label: `${S.contacts.categories[ci]?.name ?? ''} · ${pos}순위`, cls: ci === 0 ? 'top' : '', key: [ci, pos] };
+}
+function byPriority(a, b) {
+  const ka = senderInfo(a.from_addr)?.key ?? [998, 998];
+  const kb = senderInfo(b.from_addr)?.key ?? [998, 998];
+  return ka[0] - kb[0] || ka[1] - kb[1] || (a.received_at < b.received_at ? 1 : -1);
+}
+// 보낸 사람 우선순위 화면에서 정한 표시 이름 (없으면 메일에 적힌 이름)
+function displaySender(m) {
+  const c = S.contacts.contacts.find((x) => x.address === String(m.from_addr ?? '').toLowerCase());
+  return c?.name || m.from_name;
+}
+function senderNote(m) {
+  const c = S.contacts.contacts.find((x) => x.address === String(m.from_addr ?? '').toLowerCase());
+  if (!c) return '';
+  return html`<div class="sender-note">${c.note ? html`<span class="sn-label">보낸 사람 메모</span><span class="sn-text">${c.note}</span>` : html`<span class="muted small">이 사람에 대한 메모가 없습니다.</span>`}
+    <a href="#/contacts" class="small" data-open-note="${c.id}">${c.note ? '수정' : '+ 메모 쓰기'}</a></div>`;
+}
+const senderTag = (m) => {
+  const s = senderInfo(m.from_addr);
+  return s ? html`<span class="stag ${s.cls}">${s.label}</span>` : '';
+};
+
+async function contactsApi(method, url, body) {
+  try {
+    S.contacts = await api(method, url, body);
+    refresh();
+  } catch (e) { toastErr(e); refresh(); }
+}
+const placeIn = (catId, ids) => contactsApi('POST', '/api/contacts/place', { category_id: catId, ids });
+
+function renderContacts() {
+  const { categories, contacts } = S.contacts;
+  const unc = contacts.filter((c) => c.category_id == null).sort((a, b) => ((b.last_mail ?? '') > (a.last_mail ?? '') ? 1 : -1));
+  const catOptions = (sel) => [html`<option value="" ${sel == null ? raw('selected') : ''}>미분류</option>`,
+    categories.map((k) => html`<option value="${k.id}" ${k.id === sel ? raw('selected') : ''}>${k.name}</option>`)];
+  const editing = (c) => S.noteOpen === c.id;
+  const person = (c, idx, inCat) => html`<div class="person ${editing(c) ? 'editing' : ''}" draggable="${editing(c) ? 'false' : 'true'}" data-contact="${c.id}">
+      ${inCat ? html`<span class="p-rank" title="분류 안 순서">${idx + 1}</span>` : html`<span class="p-new">NEW</span>`}
+      <div class="p-main"><div class="p-name">${c.name || c.address}
+          <button type="button" class="link small p-note-btn" data-pnote="${c.id}">${editing(c) ? '닫기' : c.note ? '메모 수정' : '+ 메모'}</button></div>
+        <div class="p-sub">${c.address} · 메일 ${c.mail_count}건${c.last_mail ? ` · 최근 ${fmtDate(c.last_mail)}` : ''}</div>
+        ${c.note && !editing(c) ? html`<div class="p-note">${c.note}</div>` : ''}
+        ${editing(c) ? html`<div class="p-edit">
+          <div class="field"><label>표시 이름</label><input data-pname="${c.id}" value="${c.name ?? ''}" placeholder="${c.address}"></div>
+          <div class="field"><label>메모·설명 (이 PC에만 저장, 공개 안 됨)</label><textarea data-pnote-text="${c.id}" rows="3" placeholder="예: 농과원 BRDF 과제 담당 PI. 메일은 당일 1차 회신, 자료 요청은 교수님께 먼저 보고">${c.note ?? ''}</textarea></div>
+          <span class="hint">입력칸을 벗어나면 저장됩니다.</span></div>` : ''}</div>
+      <div class="p-act">
+        ${inCat ? html`<button type="button" class="icon-btn sm" data-pmove="-1" data-id="${c.id}" aria-label="위로" title="위로">↑</button><button type="button" class="icon-btn sm" data-pmove="1" data-id="${c.id}" aria-label="아래로" title="아래로">↓</button>` : ''}
+        <select data-cat-of="${c.id}" aria-label="${c.name || c.address} 분류">${catOptions(c.category_id)}</select>
+      </div>
+    </div>`;
+  mount(main(), html`<div class="page">
+    <header class="page-h"><div><h1>메일</h1>
+      <p class="muted">보낸 사람 우선순위 — 1차는 <b>분류 순서</b>(위일수록 우선), 2차는 <b>분류 안의 순서</b>입니다. 끌어다 놓거나 ↑↓로 바꾸세요. 처음 메일을 보낸 사람은 '새로 들어온 사람'에 자동으로 추가됩니다.</p></div>
+      <button type="button" class="primary" id="cat-add">+ 분류 추가</button></header>
+    ${mailTabs('#/contacts')}
+    ${unc.length ? html`<section class="cat-box new" data-cat="">
+      <div class="cat-h"><b>새로 들어온 사람</b><span class="group-n">${unc.length}명</span><span class="group-hint">분류를 정하면 메일 우선순위에 반영됩니다</span></div>
+      ${unc.map((c) => person(c, 0, false))}</section>` : ''}
+    ${categories.map((k, i) => {
+      const list = contactsInCat(k.id);
+      return html`<section class="cat-box" data-cat="${k.id}">
+        <div class="cat-h"><span class="cat-rank" title="1차 우선순위">${i + 1}</span>
+          <input class="inline cat-name" data-cat-name="${k.id}" value="${k.name}" aria-label="분류 이름">
+          <span class="group-n">${list.length}명</span><span class="spacer"></span>
+          <button type="button" class="icon-btn sm" data-cmove="-1" data-id="${k.id}" aria-label="분류 위로" title="분류 위로">↑</button>
+          <button type="button" class="icon-btn sm" data-cmove="1" data-id="${k.id}" aria-label="분류 아래로" title="분류 아래로">↓</button>
+          <button type="button" class="icon-btn sm" data-cdel="${k.id}" aria-label="분류 삭제" title="분류 삭제">✕</button></div>
+        ${list.length ? list.map((c, j) => person(c, j, true)) : html`<p class="drop-hint">여기로 끌어다 놓거나, 사람 옆 분류 선택에서 '${k.name}'을 고르세요</p>`}
+      </section>`;
+    })}
+  </div>`);
+
+  const root = $('#main .page');
+  $('#cat-add').addEventListener('click', () => {
+    const m = openModal(html`<h2>분류 추가</h2><form id="caf"><div class="field"><label>분류 이름</label><input name="name" required placeholder="예: 정부기관, 해외 공동연구"></div>
+      <div class="actions"><button type="button" class="ghost" data-cancel>취소</button><button class="primary" type="submit">추가</button></div></form>`);
+    $('[data-cancel]', m).addEventListener('click', closeModal);
+    $('#caf', m).addEventListener('submit', async (e) => { e.preventDefault(); const name = e.target.name.value; closeModal(); await contactsApi('POST', '/api/contact-categories', { name }); });
+  });
+  root.addEventListener('change', (e) => {
+    const pn = e.target.closest('[data-pname]');
+    if (pn) return contactsApi('PATCH', `/api/contacts/${pn.dataset.pname}`, { name: pn.value });
+    const pt = e.target.closest('[data-pnote-text]');
+    if (pt) return contactsApi('PATCH', `/api/contacts/${pt.dataset.pnoteText}`, { note: pt.value }).then(() => toast('메모 저장됨'));
+    const sel = e.target.closest('[data-cat-of]');
+    if (sel) {
+      const id = Number(sel.dataset.catOf);
+      const to = sel.value === '' ? null : Number(sel.value);
+      return placeIn(to, to === null ? [id] : [...contactsInCat(to).map((c) => c.id).filter((x) => x !== id), id]);
+    }
+    const nm = e.target.closest('[data-cat-name]');
+    if (nm) contactsApi('PATCH', `/api/contact-categories/${nm.dataset.catName}`, { name: nm.value });
+  });
+  root.addEventListener('click', (e) => {
+    const nb = e.target.closest('[data-pnote]');
+    if (nb) {
+      const id = Number(nb.dataset.pnote);
+      S.noteOpen = S.noteOpen === id ? null : id;
+      refresh();
+      if (S.noteOpen) $(`[data-pnote-text="${id}"]`)?.focus();
+      return;
+    }
+    const pm = e.target.closest('[data-pmove]');
+    if (pm) {
+      const c = contacts.find((x) => x.id === Number(pm.dataset.id));
+      const ids = contactsInCat(c.category_id).map((x) => x.id);
+      const i = ids.indexOf(c.id);
+      const j = i + Number(pm.dataset.pmove);
+      if (j < 0 || j >= ids.length) return;
+      [ids[i], ids[j]] = [ids[j], ids[i]];
+      return placeIn(c.category_id, ids);
+    }
+    const cm = e.target.closest('[data-cmove]');
+    if (cm) {
+      const ids = categories.map((k) => k.id);
+      const i = ids.indexOf(Number(cm.dataset.id));
+      const j = i + Number(cm.dataset.cmove);
+      if (j < 0 || j >= ids.length) return;
+      [ids[i], ids[j]] = [ids[j], ids[i]];
+      return contactsApi('POST', '/api/contact-categories/order', { ids });
+    }
+    const cd = e.target.closest('[data-cdel]');
+    if (cd) {
+      const k = categories.find((x) => x.id === Number(cd.dataset.cdel));
+      if (confirm(`'${k.name}' 분류를 지울까요? 안에 있는 사람은 '새로 들어온 사람'으로 돌아갑니다. (메일은 지워지지 않음)`)) contactsApi('DELETE', `/api/contact-categories/${k.id}`);
+    }
+  });
+  // 끌어다 놓기: 사람 위에 놓으면 그 앞에, 분류 상자에 놓으면 맨 뒤에
+  root.addEventListener('dragstart', (e) => {
+    const p = e.target.closest('.person');
+    if (!p) return;
+    e.dataTransfer.setData('text/plain', p.dataset.contact);
+    e.dataTransfer.effectAllowed = 'move';
+    p.classList.add('dragging');
+  });
+  root.addEventListener('dragend', () => $$('.dragging, .drop-hover, .drop-before').forEach((el) => el.classList.remove('dragging', 'drop-hover', 'drop-before')));
+  root.addEventListener('dragover', (e) => {
+    const box = e.target.closest('.cat-box');
+    if (!box) return;
+    e.preventDefault();
+    $$('.drop-hover, .drop-before').forEach((el) => el.classList.remove('drop-hover', 'drop-before'));
+    box.classList.add('drop-hover');
+    e.target.closest('.person')?.classList.add('drop-before');
+  });
+  root.addEventListener('drop', (e) => {
+    const box = e.target.closest('.cat-box');
+    if (!box) return;
+    e.preventDefault();
+    const id = Number(e.dataTransfer.getData('text/plain'));
+    const to = box.dataset.cat === '' ? null : Number(box.dataset.cat);
+    if (to === null) return placeIn(null, [id]);
+    const ids = contactsInCat(to).map((c) => c.id).filter((x) => x !== id);
+    const before = e.target.closest('.person');
+    const at = before ? ids.indexOf(Number(before.dataset.contact)) : -1;
+    ids.splice(at >= 0 ? at : ids.length, 0, id);
+    placeIn(to, ids);
+  });
+}
+
 // ---- GitHub 게시 ----------------------------------------------------------------
 async function publishNow() {
   if (!confirm('등록 후보를 뺀 모든 업무가 GitHub Pages에 올라가 인터넷에 공개됩니다.\n(메모와 확인 기록의 "들은 내용"은 올라가지 않습니다)\n\n지금 게시할까요?')) return;
@@ -1727,6 +2280,12 @@ document.addEventListener('click', async (e) => {
     } catch (err) { toastErr(err); }
     return;
   }
+  const evEl = e.target.closest('[data-event]');
+  if (evEl && !e.target.closest('.modal')) {
+    e.preventDefault();
+    return eventModal(S.events.find((x) => x.id === Number(evEl.dataset.event)));
+  }
+  if (e.target.closest('[data-action="create"]')) return createChooser();
   const mailEl = e.target.closest('[data-mail]');
   if (mailEl) {
     e.preventDefault();
@@ -1746,6 +2305,8 @@ document.addEventListener('click', async (e) => {
     store.set('collapsed', [...S.collapsed]);
     return refresh();
   }
+  const on = e.target.closest('[data-open-note]');
+  if (on) { S.noteOpen = Number(on.dataset.openNote); closePeek(); return; }
   if (e.target.closest('[data-action="quick-add"]')) return focusQuickAdd();
   if (e.target.closest('[data-action="new-project"]')) return projectModal();
   const ep = e.target.closest('[data-edit-project]');
@@ -1768,26 +2329,28 @@ document.addEventListener('keydown', (e) => {
     return;
   }
   if (typing || e.metaKey || e.ctrlKey || e.altKey || $('#modal-root').innerHTML) return;
-  if ((e.key === 'n' || e.key === 'N') && isOwner()) { e.preventDefault(); return focusQuickAdd(); }
-  const rows = $$('#main .row[data-peek], #main .row[data-mail]');
+  if ((e.key === 'n' || e.key === 'N') && isOwner() && S.mode !== 'static') { e.preventDefault(); return focusQuickAdd(); }
+  if ((e.key === 'e' || e.key === 'E') && isOwner() && S.mode !== 'static') { e.preventDefault(); return eventModal(null, { start: S.page === 'calendar' ? S.cal.selected ?? S.today : S.today }); }
+  const rows = $$('#main .row[data-peek], #main .row[data-mail], #main .row[data-event]');
   if (!rows.length) return;
   const i = rows.indexOf(document.activeElement);
   if (e.key === 'j' || e.key === 'ArrowDown') { e.preventDefault(); rows[Math.min(i + 1, rows.length - 1)].focus(); }
   else if (e.key === 'k' || e.key === 'ArrowUp') { e.preventDefault(); rows[Math.max(i - 1, 0)].focus(); }
   else if ((e.key === 'Enter' || e.key === ' ') && i >= 0) { e.preventDefault(); openRow(rows[i]); }
 });
-const openRow = (row) => (row.dataset.mail ? openMailPeek(Number(row.dataset.mail)) : openPeek(Number(row.dataset.peek)));
+const openRow = (row) => (row.dataset.event ? eventModal(S.events.find((x) => x.id === Number(row.dataset.event)))
+  : row.dataset.mail ? openMailPeek(Number(row.dataset.mail)) : openPeek(Number(row.dataset.peek)));
 // 상세 패널이 열린 채로 목록을 위아래로 옮기면 패널도 따라간다 (Linear의 peek처럼).
 document.addEventListener('focusin', (e) => {
   const row = e.target.closest?.('#main .row[data-peek], #main .row[data-mail]');
-  if (!row || !S.peek) return;
+  if (!row || !S.peek || row.dataset.event) return;
   const kind = row.dataset.mail ? 'mail' : 'task';
   const id = Number(row.dataset.mail || row.dataset.peek);
   if (kind !== S.peekKind || id !== S.peek) openRow(row);
 });
 
 $('#menu-btn').addEventListener('click', openSideMobile);
-$('#fab').addEventListener('click', focusQuickAdd);
+$('#fab').addEventListener('click', () => createChooser());
 $('#side-backdrop').addEventListener('click', closeSideMobile);
 window.addEventListener('hashchange', route);
 
