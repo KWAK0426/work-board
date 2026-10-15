@@ -771,3 +771,7 @@ code { font-family: ui-monospace, Consolas, monospace; font-size: 12px; backgrou
   .ptabs { margin: -4px -16px 14px; padding: 0 16px; overflow-x: auto; }
   .page .ev-qa:not(.in-sheet) { display: flex; }
 }
+
+.pub-toggle { border: 1px solid var(--line-2); background: var(--surface); border-radius: 6px; padding: 3px 8px; font-size: 12px; color: var(--muted); white-space: nowrap; margin-left: 4px; }
+.pub-toggle.on { border-color: #b7e2c7; background: var(--ok-soft); color: var(--ok); font-weight: 600; }
+.hidden-mails { margin: 6px 0 0; }

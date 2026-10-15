@@ -282,7 +282,7 @@ function renderSide() {
   const todayN = active.filter((t) => effDate(t) && effDate(t) <= S.today).length;
   const mismatchN = active.filter((t) => t.derived.mismatch).length;
   const cands = S.tasks.filter((t) => t.status === 'candidate').length;
-  const unseenN = S.mails.filter((m) => !m.seen).length;
+  const unseenN = S.mails.filter((m) => !m.seen && !m.hidden).length;
   const item = (page, label, icon, n, cls = '', extra = '', pages = [page]) => html`<a href="#/${page}" class="nav-item ${extra} ${pages.includes(S.page) ? 'on' : ''}">
       <span class="ico ico-${icon}" aria-hidden="true"></span><span class="nav-label">${label}</span>${n ? html`<span class="nav-n ${cls}">${n}</span>` : ''}</a>`;
   mount($('#side'), html`
@@ -326,7 +326,7 @@ const isPhone = () => phoneQuery.matches;
 function renderTabbar() {
   const tabs = [['calendar', '캘린더', 'cal', ['calendar']], ['today', '할 일', 'list', ['today', 'tasks']], ['mail', '메일', 'mail', ['mail', 'contacts']], ['compare', '비교', 'cmp', ['compare']]];
   const active = activeTasks();
-  const badge = { today: active.filter((t) => effDate(t) && effDate(t) <= S.today).length, mail: S.mails.filter((m) => !m.seen).length, compare: active.filter((t) => t.derived.mismatch).length };
+  const badge = { today: active.filter((t) => effDate(t) && effDate(t) <= S.today).length, mail: S.mails.filter((m) => !m.seen && !m.hidden).length, compare: active.filter((t) => t.derived.mismatch).length };
   const inMore = !tabs.some(([, , , pages]) => pages.includes(S.page));
   mount($('#tabbar'), html`${tabs.map(([k, label, icon, pages]) => html`<a href="#/${k}" class="tab ${pages.includes(S.page) ? 'on' : ''}">
       <span class="ico ico-${icon}" aria-hidden="true"></span><span>${label}</span>${badge[k] ? html`<span class="tab-n">${badge[k]}</span>` : ''}</a>`)}
@@ -541,10 +541,11 @@ function taskRow(t) {
   </div>`;
 }
 
-function groupSection(key, label, list, { tone = '', hint = '' } = {}, rowFn = taskRow) {
+// folded: 처음엔 접혀 있고 눌러야 펼쳐지는 묶음 (공개 페이지의 메일 등)
+function groupSection(key, label, list, { tone = '', hint = '', folded = false } = {}, rowFn = taskRow) {
   if (!list.length) return '';
-  const id = `${S.page}:${key}`;
-  const collapsed = S.collapsed.has(id);
+  const id = folded ? `${S.page}:${key}:open` : `${S.page}:${key}`;
+  const collapsed = folded ? !S.collapsed.has(id) : S.collapsed.has(id);
   return html`<section class="group ${collapsed ? 'collapsed' : ''}">
     <button type="button" class="group-h ${tone}" data-collapse="${id}" aria-expanded="${collapsed ? 'false' : 'true'}">
       <span class="caret" aria-hidden="true"></span>${label}<span class="group-n">${list.length}</span>${hint ? html`<span class="group-hint">${hint}</span>` : ''}
@@ -601,7 +602,7 @@ function taskTabs(activeHref) {
   return pageTabs([['#/today', '오늘', active.filter((t) => effDate(t) && effDate(t) <= S.today).length, active.some((t) => t.derived.due_flag === 'overdue') ? 'bad' : ''], ['#/tasks', '전체', active.length]], activeHref);
 }
 function mailTabs(activeHref) {
-  const tabs = [['#/mail', '받은 메일', S.mails.filter((m) => !m.seen).length, 'new']];
+  const tabs = [['#/mail', '받은 메일', S.mails.filter((m) => !m.seen && !m.hidden).length, 'new']];
   if (isOwner() && S.mode !== 'static') tabs.push(['#/contacts', '보낸 사람 우선순위', S.contacts.contacts.filter((c) => c.category_id == null).length, 'warn']);
   return pageTabs(tabs, activeHref);
 }
@@ -630,7 +631,7 @@ function renderToday() {
   const review = pick((t) => t.derived.review_needed && (t.my_urgency === 'super' || t.my_urgency === 'urgent'));
   const unrated = pick((t) => t.derived.self_missing.length > 0);
   const cands = S.tasks.filter((t) => t.status === 'candidate').length;
-  const newMails = S.mails.filter((m) => !m.seen).sort(byPriority);
+  const newMails = S.mails.filter((m) => !m.seen && !m.hidden).sort(byPriority);
   const todayEvents = eventsOn(S.today);
   const soonEvents = S.events.filter((e) => e.start_date > S.today && e.start_date <= addDaysStr(S.today, 7));
   const empty = !used.size && !newMails.length && !todayEvents.length && !soonEvents.length;
@@ -1120,7 +1121,7 @@ function mailDots(d, byDate) {
   const list = byDate.get(d) ?? [];
   if (!list.length) return '';
   const levels = [...new Set(list.map(mailLevel))].sort((a, b) => levelOrder(a) - levelOrder(b));
-  const unseen = list.some((m) => !m.seen);
+  const unseen = list.some((m) => !m.seen && !m.hidden);
   const names = levels.map((l) => (l === 'u' ? '미분류' : l === 's' ? '메일' : S.contacts.categories[l - 1]?.name)).join(', ');
   return html`<span class="mdots" title="메일 ${list.length}건 (${names})${unseen ? ' · 새 메일 있음' : ''}">${levels.map((l) => html`<i class="md p${l}"></i>`)}${unseen ? html`<span class="new-emo">🆕</span>` : ''}</span>`;
 }
@@ -1187,7 +1188,9 @@ function renderCalendar() {
 
   const sel = S.cal.selected;
   const selEvents = eventsOn(sel);
-  const selMails = (byDate.get(sel) ?? []).slice().sort(byPriority);
+  const selAll = byDate.get(sel) ?? [];
+  const selMails = selAll.filter((m) => !m.hidden).sort(byPriority);
+  const selHidden = selAll.length - selMails.length;
   const selTasks = taskMap.get(sel) ?? [];
   const taskItem = (e) => {
     const t = e.t;
@@ -1238,8 +1241,9 @@ function renderCalendar() {
             <div class="side-day">${Number(sel.slice(5, 7))}월 ${Number(sel.slice(8))}일 ${WEEK[dowOf(sel)]}요일 <span class="muted small">${sel === S.today ? '오늘' : dday(sel)}</span></div>
             ${selEvents.length ? html`<h4 class="day-sec">일정</h4><div class="day-list">${selEvents.map(eventItem)}</div>` : ''}
             ${selTasks.length ? html`<h4 class="day-sec">업무</h4><div class="day-list">${selTasks.map(taskItem)}</div>` : ''}
-            ${selMails.length ? html`<h4 class="day-sec">받은 메일</h4><div class="day-list">${selMails.map(mailItem)}</div>` : ''}
-            ${!selEvents.length && !selTasks.length && !selMails.length ? html`<p class="muted small">이 날짜에는 일정·업무·메일이 없습니다.</p>` : ''}
+            ${selMails.length || selHidden ? html`<h4 class="day-sec">받은 메일</h4><div class="day-list">${selMails.map(mailItem)}</div>
+              ${selHidden ? html`<p class="small muted hidden-mails">${selMails.length ? '그 외 ' : ''}메일 ${selHidden}건 — 제목·발신인 비공개</p>` : ''}` : ''}
+            ${!selEvents.length && !selTasks.length && !selAll.length ? html`<p class="muted small">이 날짜에는 일정·업무·메일이 없습니다.</p>` : ''}
             ${owner ? html`<div class="day-adds"><button type="button" class="dash-btn" data-new-event="${sel}">+ 일정</button><button type="button" class="dash-btn" data-new-task="${sel}">+ 업무</button></div>` : ''}
           </section>
           ${undated.length ? html`<section class="side-card">
@@ -1841,7 +1845,21 @@ function naverConnectForm() {
     </form></div>`;
 }
 
+function renderMailPublic() {
+  const shown = S.mails.filter((m) => !m.hidden).sort((a, b) => (a.received_date < b.received_date ? 1 : -1));
+  const hiddenN = S.mails.length - shown.length;
+  mount(main(), html`<div class="page">
+    <header class="page-h"><div><h1>메일</h1>
+      <p class="muted">연구실 편지함 · 주요 발신인의 메일만 제목과 발신인을 공개합니다</p></div></header>
+    ${mailTabs('#/mail')}
+    ${groupSection('pub', '주요 메일', shown, { tone: 'info', folded: true, hint: '눌러서 펼치기' }, mailRow)}
+    ${hiddenN ? html`<p class="notice subtle">그 외 메일 ${hiddenN}건 — 제목·발신인 비공개</p>` : ''}
+    ${!S.mails.length ? html`<div class="empty-state"><b>받은 메일이 없습니다</b></div>` : ''}
+  </div>`);
+}
+
 function renderMail() {
+  if (!isOwner() || S.mode === 'static') return renderMailPublic();
   const owner = isOwner() && S.mode !== 'static';
   const st = S.mailStatus;
   const by = (k) => S.mails.filter((m) => mailState(m) === k);
@@ -2083,7 +2101,8 @@ function senderNote(m) {
   const c = S.contacts.contacts.find((x) => x.address === String(m.from_addr ?? '').toLowerCase());
   if (!c) return '';
   return html`<div class="sender-note">${c.note ? html`<span class="sn-label">보낸 사람 메모</span><span class="sn-text">${c.note}</span>` : html`<span class="muted small">이 사람에 대한 메모가 없습니다.</span>`}
-    <a href="#/contacts" class="small" data-open-note="${c.id}">${c.note ? '수정' : '+ 메모 쓰기'}</a></div>`;
+    <a href="#/contacts" class="small" data-open-note="${c.id}">${c.note ? '수정' : '+ 메모 쓰기'}</a>
+    <span class="small ${c.public_title ? 'tx-ok' : 'muted'}">${c.public_title ? '🔓 공개 페이지에 제목·발신인 표시' : '🔒 공개 페이지에는 비공개'}</span></div>`;
 }
 const senderTag = (m) => {
   const s = senderInfo(m.from_addr);
@@ -2116,12 +2135,14 @@ function renderContacts() {
           <span class="hint">입력칸을 벗어나면 저장됩니다.</span></div>` : ''}</div>
       <div class="p-act">
         ${inCat ? html`<button type="button" class="icon-btn sm" data-pmove="-1" data-id="${c.id}" aria-label="위로" title="위로">↑</button><button type="button" class="icon-btn sm" data-pmove="1" data-id="${c.id}" aria-label="아래로" title="아래로">↓</button>` : ''}
+        <button type="button" class="pub-toggle ${c.public_title ? 'on' : ''}" data-ppub="${c.id}" aria-pressed="${c.public_title ? 'true' : 'false'}"
+          title="공개 페이지에 이 사람 메일의 제목·발신인을 ${c.public_title ? '보이는 중 (누르면 숨김)' : '숨기는 중 (누르면 공개)'}">${c.public_title ? '🔓 공개' : '🔒 비공개'}</button>
         <select data-cat-of="${c.id}" aria-label="${c.name || c.address} 분류">${catOptions(c.category_id)}</select>
       </div>
     </div>`;
   mount(main(), html`<div class="page">
     <header class="page-h"><div><h1>메일</h1>
-      <p class="muted">보낸 사람 우선순위 — 1차는 <b>분류 순서</b>(위일수록 우선), 2차는 <b>분류 안의 순서</b>입니다. 끌어다 놓거나 ↑↓로 바꾸세요. 처음 메일을 보낸 사람은 '새로 들어온 사람'에 자동으로 추가됩니다.</p></div>
+      <p class="muted"><b>🔓 공개</b>로 둔 사람의 메일만 공개 페이지에 제목·발신인이 보입니다(나머지는 개수만). 보낸 사람 우선순위 — 1차는 <b>분류 순서</b>(위일수록 우선), 2차는 <b>분류 안의 순서</b>입니다. 끌어다 놓거나 ↑↓로 바꾸세요. 처음 메일을 보낸 사람은 '새로 들어온 사람'에 자동으로 추가됩니다.</p></div>
       <button type="button" class="primary" id="cat-add">+ 분류 추가</button></header>
     ${mailTabs('#/contacts')}
     ${unc.length ? html`<section class="cat-box new" data-cat="">
@@ -2163,6 +2184,12 @@ function renderContacts() {
     if (nm) contactsApi('PATCH', `/api/contact-categories/${nm.dataset.catName}`, { name: nm.value });
   });
   root.addEventListener('click', (e) => {
+    const pb = e.target.closest('[data-ppub]');
+    if (pb) {
+      const c = contacts.find((x) => x.id === Number(pb.dataset.ppub));
+      return contactsApi('PATCH', `/api/contacts/${c.id}`, { public_title: !c.public_title })
+        .then(() => toast(`${c.name || c.address}: 공개 페이지에서 메일 제목·발신인 ${c.public_title ? '숨김' : '공개'}`));
+    }
     const nb = e.target.closest('[data-pnote]');
     if (nb) {
       const id = Number(nb.dataset.pnote);
