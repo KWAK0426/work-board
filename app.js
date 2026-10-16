@@ -307,13 +307,13 @@ function renderSide() {
         <span class="proj-dot" aria-hidden="true"></span><span class="nav-label">${p.title}</span>${p.active_count ? html`<span class="nav-n">${p.active_count}</span>` : ''}</a>`)}
     </div>
     <nav class="nav side-bottom">
-      ${owner ? item('candidates', '등록 후보', 'inbox', cands, cands ? 'warn' : '') : ''}
+      ${owner && S.mode !== 'open' ? item('candidates', '등록 후보', 'inbox', cands, cands ? 'warn' : '') : ''}
       ${item('history', '변경 이력', 'hist')}
     </nav>
     <div class="side-foot">
       ${S.mode === 'static'
         ? html`<div class="who"><b>${S.me.display_name || '업무 게시판'}</b><span class="muted small">읽기 전용 · ${fmtTs(S.generatedAt)} 게시</span></div>`
-        : html`<div class="who"><b>${S.me.display_name}</b><span class="muted small">${owner ? (S.mode === 'local' ? '내 PC에서 편집' : S.mode === 'remote' ? 'GitHub 페이지에서 편집 중' : '편집') : '열람 전용'}</span></div>
+        : html`<div class="who"><b>${S.me.display_name}</b><span class="muted small">${owner ? (S.mode === 'local' ? '내 PC에서 편집' : S.mode === 'remote' ? 'GitHub 페이지에서 편집 중' : S.mode === 'open' ? '누구나 바로 수정할 수 있는 페이지' : '편집') : '열람 전용'}</span></div>
           ${remoteStatusLine()}
           ${S.mode === 'remote' ? html`<button type="button" class="link small" id="remote-off">이 기기 편집 모드 끄기</button>` : ''}
           ${S.canPublish ? html`<button type="button" class="publish-btn" id="publish">GitHub에 게시</button>` : ''}
@@ -375,7 +375,7 @@ function route() {
     openPeek(Number(m[2]));
     return;
   }
-  if (!VIEWS[page] || (!isOwner() && (page === 'candidates' || page === 'contacts'))) page = 'calendar';
+  if (!VIEWS[page] || ((!isOwner() || S.mode === 'open') && (page === 'candidates' || page === 'contacts'))) page = 'calendar';
   S.page = page;
   S.pageArg = m[2] ?? null;
   closeModal();
@@ -611,7 +611,7 @@ function taskTabs(activeHref) {
 }
 function mailTabs(activeHref) {
   const tabs = [['#/mail', '받은 메일', S.mails.filter((m) => !m.seen && !m.hidden).length, 'new']];
-  if (isOwner() && S.mode !== 'static') tabs.push(['#/contacts', '보낸 사람 우선순위', S.contacts.contacts.filter((c) => c.category_id == null).length, 'warn']);
+  if (isOwner() && S.mode !== 'static' && S.mode !== 'open') tabs.push(['#/contacts', '보낸 사람 우선순위', S.contacts.contacts.filter((c) => c.category_id == null).length, 'warn']);
   return pageTabs(tabs, activeHref);
 }
 function eventRow(e) {
@@ -1519,7 +1519,7 @@ function eventModal(ev = null, { start = S.today, end = null, draft = null } = {
         <label class="toggle"><input type="checkbox" name="all_day" ${e.all_day ? raw('checked') : ''}> 하루 종일</label>
         <span class="ev-times" ${e.all_day ? raw('hidden') : ''}><input type="time" name="start_time" step="300" value="${e.start_time ?? ''}" aria-label="시작 시간"> ~ <input type="time" name="end_time" step="300" value="${e.end_time ?? ''}" aria-label="종료 시간"></span>
       </div>
-      <div class="field"><label>메모 <span class="muted">— 무엇에 대한 일정인지, 준비할 것·링크 등 (공개 페이지에는 안 보임)</span></label><textarea name="note" rows="4" placeholder="예: 구두발표 15분, 세션 B-2. 발표자료 10/18까지 교수님 검토">${e.note ?? ''}</textarea></div>
+      <div class="field"><label>메모 <span class="muted">— 무엇에 대한 일정인지, 준비할 것·링크 등 ${S.mode === 'open' ? '(이 페이지를 여는 누구나 볼 수 있음)' : '(공개 페이지에는 안 보임)'}</span></label><textarea name="note" rows="4" placeholder="예: 구두발표 15분, 세션 B-2. 발표자료 10/18까지 교수님 검토">${e.note ?? ''}</textarea></div>
       ${e.location ? html`<div class="field"><label>장소</label><input name="location" maxlength="200" value="${e.location}"></div>` : html`<input type="hidden" name="location" value="">`}
       <div class="actions">${ev ? html`<button type="button" class="ghost danger" data-del>삭제</button><span class="spacer"></span>` : ''}
         <button type="button" class="ghost" data-cancel>취소</button><button class="primary" type="submit">${ev ? '저장' : '추가'}</button></div>
@@ -1940,7 +1940,7 @@ function renderMailPublic() {
 }
 
 function renderMail() {
-  if (!isOwner() || S.mode === 'static') return renderMailPublic();
+  if (!isOwner() || S.mode === 'static' || S.mode === 'open') return renderMailPublic();
   const owner = isOwner() && S.mode !== 'static';
   const st = S.mailStatus;
   const by = (k) => S.mails.filter((m) => mailState(m) === k);
@@ -2001,6 +2001,7 @@ async function syncMailNow() {
 }
 
 async function openMailPeek(id) {
+  if (S.mode === 'open') return mailNoteModal(id);
   if (S.peekKind !== 'mail' || S.peek !== id) S.replyForm = null;
   S.peek = id;
   S.peekKind = 'mail';
@@ -2483,7 +2484,7 @@ function reduceRemote(B, rawOp) {
     return B.event_types;
   }
   // 보낸 사람 우선순위
-  const C = B.contacts;
+  const C = B.contacts ?? { categories: [], contacts: [] };
   if (p === '/api/contacts/place') {
     const cat = body.category_id ?? null;
     (body.ids ?? []).forEach((id, i) => { const c = C.contacts.find((x) => x.id === Number(id)); if (c) { c.category_id = cat; c.rank = cat === null ? null : i + 1; } });
@@ -2527,14 +2528,14 @@ function reduceRemote(B, rawOp) {
 function remoteGet(path) {
   const B = REMOTE.base;
   const detail = (t) => (t ? { ...t } : null);
-  if (path === '/api/me') return { user: { display_name: B.owner_name, role: 'owner' }, today: todayKst(), mode: 'remote', generated_at: REMOTE.full.generated_at, publish: false };
+  if (path === '/api/me') return { user: { display_name: B.owner_name, role: 'owner' }, today: todayKst(), mode: REMOTE.open ? 'open' : 'remote', generated_at: REMOTE.full.generated_at, publish: false };
   if (path === '/api/tasks') return B.tasks.map(({ reviews, activity, ...t }) => t);
   if (path === '/api/projects') return B.projects;
   if (path === '/api/mails') return B.mails;
   if (path === '/api/events') return B.events;
   if (path === '/api/event-types') return B.event_types;
-  if (path === '/api/contacts') return B.contacts;
-  if (path === '/api/mail/status') return B.mail_status;
+  if (path === '/api/contacts') return B.contacts ?? { categories: [], contacts: [] };
+  if (path === '/api/mail/status') return B.mail_status ?? null;
   if (path === '/api/backups') return { last: B.backup };
   if (path === '/api/activity') {
     return B.tasks.flatMap((t) => (t.activity ?? []).map((a) => ({ ...a, task_code: t.task_code, task_title: t.title }))).sort((a, b) => (a.created_at < b.created_at ? 1 : -1)).slice(0, 500);
@@ -2549,9 +2550,14 @@ function remoteGet(path) {
 async function remoteApi(method, url, body) {
   const path = url.split('?')[0];
   if (method === 'GET') return remoteGet(path);
-  if (REMOTE_BLOCKED.some((re) => re.test(path))) throw new Error('이 기능은 PC의 게시판에서만 할 수 있습니다');
+  if (REMOTE_BLOCKED.some((re) => re.test(path)) || (REMOTE.open && OPEN_BLOCKED.some((re) => re.test(path)))) throw new Error('이 기능은 PC의 게시판에서만 할 수 있습니다');
   const creates = method === 'POST' && (/^\/api\/(tasks|events|projects|event-types|contact-categories)$/.test(path) || /\/reply-task$/.test(path));
   const op = { method, path, body, temp_id: creates ? -(Date.now() * 10 + Math.floor(Math.random() * 10)) : undefined, created_at: new Date().toISOString() };
+  if (REMOTE.open) {
+    const r = await relayCall('POST', { action: 'op', op });
+    REMOTE.ops.push({ name: r.qid, op });
+    return reduceRemote(REMOTE.base, op) ?? { ok: true };
+  }
   const name = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`;
   // 같은 저장소에 동시에 쓰면 충돌하므로 한 번에 하나씩
   const put = remoteChain.then(() => gh('PUT', `contents/queue/${name}`, { body: { message: `원격 편집: ${method} ${path}`, content: toB64(JSON.stringify(op)), branch: 'main' } }));
@@ -2562,7 +2568,7 @@ async function remoteApi(method, url, body) {
 }
 
 function remoteStatusLine() {
-  if (S.mode !== 'remote' || !REMOTE) return '';
+  if ((S.mode !== 'remote' && S.mode !== 'open') || !REMOTE) return '';
   const n = REMOTE.ops.length;
   const errs = (REMOTE.full.remote_errors ?? []).filter((e) => e.at > new Date(Date.now() - 86400000).toISOString());
   return html`<div class="remote-st"><span class="${n ? 'tx-warn' : 'tx-ok'}">${n ? `PC 반영 대기 ${n}건` : '모두 반영됨'}</span>
@@ -2607,12 +2613,37 @@ function remoteConnectModal({ then = null } = {}) {
     }
   });
 }
+// ---- 누구나 수정 (키 없음) ---------------------------------------------------------
+// 저장하면 요청이 Google Apps Script 저장 창구에 쌓이고, PC가 1분마다 가져가 실행한 뒤 최신 데이터를 다시 올린다.
+// 보낸 사람 목록·등록 후보·비공개 메일은 여기서 다루지 않는다 (PC 전용).
+const OPEN_BLOCKED = [/^\/api\/contact/, /^\/api\/mail\/sync/];
+async function relayCall(method, body) {
+  const url = SITE.relay_url;
+  const res = await fetch(method === 'GET' ? `${url}?action=${body}` : url, {
+    method, cache: 'no-store', redirect: 'follow',
+    // text/plain: 브라우저의 사전 확인(CORS preflight) 없이 바로 보낸다
+    headers: method === 'POST' ? { 'Content-Type': 'text/plain;charset=utf-8' } : undefined,
+    body: method === 'POST' ? JSON.stringify(body) : undefined,
+  });
+  let data;
+  try { data = await res.json(); } catch { throw new Error('저장 창구에 연결하지 못했습니다'); }
+  if (data && data.ok === false) throw new Error(data.error || '저장하지 못했습니다');
+  return data;
+}
+async function loadRelay() {
+  const [snap, ops] = await Promise.all([relayCall('GET', 'snapshot'), relayCall('GET', 'ops')]);
+  // PC가 아직 한 번도 올리지 않았으면 공개 데이터(data.json)에서 시작
+  const full = snap && Array.isArray(snap.tasks) ? snap : { ...SITE, id_map: {}, remote_errors: [] };
+  REMOTE = { open: true, full, ops: (Array.isArray(ops) ? ops : []).map((op) => ({ name: op.qid, op })), base: null };
+  rebuildRemote();
+}
+
 async function bootRemote() {
   REMOTE_ON = true;
   const me = await api('GET', '/api/me');
   S.me = me.user;
   S.today = me.today;
-  S.mode = 'remote';
+  S.mode = me.mode;
   S.canPublish = false;
   S.generatedAt = me.generated_at;
   await loadAll();
@@ -2625,9 +2656,9 @@ function remoteDisconnect() {
 }
 // 다른 기기·PC에서 바뀐 내용을 1분마다 가져온다
 setInterval(async () => {
-  if (S.mode !== 'remote' || document.hidden || $('#modal-root').innerHTML) return;
+  if ((S.mode !== 'remote' && S.mode !== 'open') || document.hidden || $('#modal-root').innerHTML) return;
   if (main().contains(document.activeElement) && document.activeElement.matches('input, textarea, select')) return;
-  try { await loadRemote(); await loadAll(); refresh(); if (S.peek && S.peekKind === 'task') openPeek(S.peek); } catch { /* 다음에 다시 */ }
+  try { await (S.mode === 'open' ? loadRelay() : loadRemote()); await loadAll(); refresh(); if (S.peek && S.peekKind === 'task') openPeek(S.peek); } catch { /* 다음에 다시 */ }
 }, 60000);
 
 // ---- 메일 상세 창: 핵심 내용·우선순위·할 일 목록 (캘린더·메일 목록에서 열기) --------------------
@@ -2643,9 +2674,9 @@ function mailNoteModal(id) {
   const draft = { summary: m.summary ?? '', priority: m.priority ?? null, todos: (Array.isArray(m.todos) ? m.todos : []).map((t) => ({ ...t })) };
   const owner = isOwner() && S.mode !== 'static';
   // 처음 연 메일은 '읽음' 처리 (🆕 사라짐)
-  if (owner && !m.seen) api('POST', `/api/mails/${m.id}/seen`).then((x) => { upsertMail(x); refresh(); }).catch(() => {});
+  if (owner && S.mode !== 'open' && !m.seen) api('POST', `/api/mails/${m.id}/seen`).then((x) => { upsertMail(x); refresh(); }).catch(() => {});
   const render = () => {
-    const pdf = owner && m.pdf_file ? mailFileUrl(m, m.pdf_file, m.pdf_url) : null;
+    const pdf = owner && S.mode !== 'open' && m.pdf_file ? mailFileUrl(m, m.pdf_file, m.pdf_url) : null;
     const box = openModal(html`<div class="sheet-h"><h2 class="mn-title">${m.subject}</h2><button type="button" class="icon-btn" data-cancel aria-label="닫기">✕</button></div>
       <p class="small muted mn-meta">${displaySender(m)} · ${fmtDate(m.received_date)} 수신 ${senderTag(m)}
         ${pdf ? html` · <a href="${pdf}" target="_blank" rel="noopener">PDF 보기</a>` : ''}</p>
@@ -2659,7 +2690,7 @@ function mailNoteModal(id) {
             <button type="button" class="icon-btn sm" data-todo-del="${i}" aria-label="할 일 삭제">✕</button></li>`)}</ul>` : ''}
           <div class="todo-add"><input name="todo" maxlength="200" placeholder="할 일을 적고 Enter (예: 원영상 폴더 확인)"><button type="button" class="ghost" data-todo-add>추가</button></div>
         </div>
-        <div class="actions">${owner || S.mode === 'remote' ? html`<a href="#" class="small" data-open-mailpeek="${m.id}">회신 관리 · 본문 →</a>` : ''}<span class="spacer"></span>
+        <div class="actions">${(owner || S.mode === 'remote') && S.mode !== 'open' ? html`<a href="#" class="small" data-open-mailpeek="${m.id}">회신 관리 · 본문 →</a>` : ''}<span class="spacer"></span>
           <button type="button" class="ghost" data-cancel>닫기</button><button class="primary" type="submit">저장</button></div>
       </form>`);
     box.classList.add('mail-note');
@@ -2709,6 +2740,7 @@ function mailNoteModal(id) {
 // 공개 페이지에서 처음 저장할 때만 저장 키를 묻고, 그 뒤로는 바로 저장
 function requireEdit(fn) {
   if (S.mode !== 'static') return fn();
+  if (SITE?.relay_url) return toast('저장 창구에 연결하지 못해 지금은 보기만 됩니다. 잠시 후 새로고침하세요', { err: true });
   if (!SITE?.data_repo) return toast('이 페이지에서는 저장할 수 없습니다', { err: true });
   remoteConnectModal({ then: fn });
 }
@@ -2842,7 +2874,16 @@ $('#side-backdrop').addEventListener('click', closeSideMobile);
 window.addEventListener('hashchange', route);
 
 async function boot() {
-  if (STATIC && ghToken()) {
+  if (STATIC) {
+    try {
+      await staticApi('GET', '/api/me');
+      if (SITE.relay_url) { await loadRelay(); return await bootRemote(); }
+    } catch (e) {
+      REMOTE_ON = false;
+      setTimeout(() => toast(`저장 창구 연결 실패: ${e.message} — 보기 모드로 엽니다`, { err: true }), 800);
+    }
+  }
+  if (STATIC && ghToken() && !SITE?.relay_url) {
     try {
       await staticApi('GET', '/api/me');
       if (SITE.data_repo) { await loadRemote(); return await bootRemote(); }
