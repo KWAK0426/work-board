@@ -802,3 +802,9 @@ code { font-family: ui-monospace, Consolas, monospace; font-size: 12px; backgrou
   .type-row { grid-template-columns: 16px 1fr auto; }
   .type-row .swatches { grid-column: 1 / -1; }
 }
+
+.edit-on { background: var(--accent); color: #fff; border-color: var(--accent); }
+.edit-on:hover { background: var(--accent-2); }
+.edit-on::before { display: none; }
+.remote-st { display: flex; flex-direction: column; gap: 1px; font-size: 12px; font-weight: 600; }
+.steps { padding-left: 18px; line-height: 1.8; }

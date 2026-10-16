@@ -63,6 +63,7 @@ const PROFESSOR_DEFAULT = '김원국 교수님';
 // GitHub Pages에 올라간 읽기 전용 페이지는 서버 대신 data.json을 읽는다.
 const STATIC = document.documentElement.dataset.mode === 'static';
 let SITE = null;
+let REMOTE_ON = false; // GitHub 키로 편집 중
 async function staticApi(method, url) {
   if (method !== 'GET') throw new Error('읽기 전용 페이지입니다');
   if (!SITE) {
@@ -96,7 +97,7 @@ async function staticApi(method, url) {
 }
 
 async function api(method, url, body) {
-  if (STATIC) return staticApi(method, url);
+  if (STATIC) return REMOTE_ON ? remoteApi(method, url, body) : staticApi(method, url);
   const res = await fetch(url, {
     method,
     credentials: 'same-origin',
@@ -311,8 +312,11 @@ function renderSide() {
     </nav>
     <div class="side-foot">
       ${S.mode === 'static'
-        ? html`<div class="who"><b>${S.me.display_name || '업무 게시판'}</b><span class="muted small">읽기 전용 · ${fmtTs(S.generatedAt)} 게시</span></div>`
-        : html`<div class="who"><b>${S.me.display_name}</b><span class="muted small">${owner ? (S.mode === 'local' ? '내 PC에서 편집' : '편집') : '열람 전용'}</span></div>
+        ? html`<div class="who"><b>${S.me.display_name || '업무 게시판'}</b><span class="muted small">읽기 전용 · ${fmtTs(S.generatedAt)} 게시</span></div>
+          ${SITE?.data_repo ? html`<button type="button" class="publish-btn edit-on" id="remote-on">✏️ 이 기기에서 편집하기</button>` : ''}`
+        : html`<div class="who"><b>${S.me.display_name}</b><span class="muted small">${owner ? (S.mode === 'local' ? '내 PC에서 편집' : S.mode === 'remote' ? 'GitHub 페이지에서 편집 중' : '편집') : '열람 전용'}</span></div>
+          ${remoteStatusLine()}
+          ${S.mode === 'remote' ? html`<button type="button" class="link small" id="remote-off">이 기기 편집 모드 끄기</button>` : ''}
           ${S.canPublish ? html`<button type="button" class="publish-btn" id="publish">GitHub에 게시</button>` : ''}
           ${S.mode === 'server' ? html`<button type="button" class="link small" id="logout">로그아웃</button>` : ''}`}
     </div>`);
@@ -321,6 +325,8 @@ function renderSide() {
   $('#app').classList.remove('bare');
   mount($('#mobile-title'), html`<a class="brand" href="#/calendar"><span class="logo"></span>업무 게시판</a>`);
   $('#publish')?.addEventListener('click', publishNow);
+  $('#remote-on')?.addEventListener('click', remoteConnectModal);
+  $('#remote-off')?.addEventListener('click', remoteDisconnect);
   $('#logout')?.addEventListener('click', logout);
   renderTabbar();
 }
@@ -697,7 +703,7 @@ function listToolbar(base) {
       <input type="search" id="q" placeholder="검색" value="${f.q}" aria-label="업무 검색">
       <select id="fgroup" aria-label="묶기">${Object.entries(GROUPS).map(([k, v]) => html`<option value="${k}" ${k === f.group ? raw('selected') : ''}>${v}</option>`)}</select>
       <label class="toggle"><input type="checkbox" id="fclosed" ${f.showClosed ? raw('checked') : ''}> 완료 포함</label>
-      ${isOwner() && S.mode !== 'static' ? html`<details class="menu"><summary aria-label="더보기" title="내보내기">⋯</summary><div class="menu-pop"><a href="/api/export.csv">CSV 내보내기</a><a href="/api/export.json">JSON 백업</a></div></details>` : ''}
+      ${isOwner() && (S.mode === 'local' || S.mode === 'server') ? html`<details class="menu"><summary aria-label="더보기" title="내보내기">⋯</summary><div class="menu-pop"><a href="/api/export.csv">CSV 내보내기</a><a href="/api/export.json">JSON 백업</a></div></details>` : ''}
     </div>
   </div>`;
 }
@@ -1866,7 +1872,8 @@ function mailStatusPills(m) {
     ${st === 'unsorted' ? html`<span class="pill need">회신 여부 미정</span>` : ''}
     ${st === 'noreply' ? html`<span class="meta muted">회신 불필요</span>` : ''}`;
 }
-const mailFileUrl = (m, file, url) => url || `/api/mails/${m.id}/file?name=${encodeURIComponent(file)}`;
+// Drive에 아직 안 올라간 파일은 이 PC의 게시판에서만 열린다
+const mailFileUrl = (m, file, url) => url || (S.mode === 'remote' ? (m.drive_folder_url ?? '#') : `/api/mails/${m.id}/file?name=${encodeURIComponent(file)}`);
 
 function mailRow(m) {
   const st = mailState(m);
@@ -2327,6 +2334,295 @@ function renderContacts() {
   });
 }
 
+// ---- 원격 편집 (방법 A) -------------------------------------------------------------
+// GitHub 페이지에서 고친 내용은 비공개 저장소(work-board-data)의 queue/에 요청 파일로 올라가고,
+// 이 PC가 켜져 있으면 1분 안에 그대로 실행한다. 화면에는 바로 반영해서 보여 준다(반영 대기 표시).
+// 키는 이 기기 브라우저(localStorage)에만 저장한다.
+const GH_API = store.get('ghApi', 'https://api.github.com');
+const ghToken = () => store.get('ghToken', null);
+let REMOTE = null; // { repo, full, ops: [{ name, op }], base }
+let remoteChain = Promise.resolve();
+const REMOTE_BLOCKED = [/^\/api\/mail\/naver/, /^\/api\/publish/, /^\/api\/export/, /^\/api\/login/, /^\/api\/logout/];
+
+async function gh(method, part, { body, raw = false, repo = REMOTE?.repo ?? SITE?.data_repo, token = ghToken() } = {}) {
+  const res = await fetch(`${GH_API}/repos/${repo}/${part}`, {
+    method,
+    cache: 'no-store',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      Accept: raw ? 'application/vnd.github.raw+json' : 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+      ...(body ? { 'Content-Type': 'application/json' } : {}),
+    },
+    body: body ? JSON.stringify(body) : undefined,
+  });
+  if (res.status === 404 && method === 'GET') return null;
+  if (!res.ok) {
+    if (res.status === 401) throw new Error('GitHub 키가 맞지 않거나 만료됐습니다');
+    if (res.status === 403 || res.status === 404) throw new Error('GitHub 키에 work-board-data 저장소 권한(Contents 읽기·쓰기)이 없습니다');
+    throw new Error(`GitHub 오류 (${res.status})`);
+  }
+  return raw ? res.text() : res.json();
+}
+const toB64 = (s) => {
+  const bytes = new TextEncoder().encode(s);
+  let bin = '';
+  for (let i = 0; i < bytes.length; i += 0x8000) bin += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+  return btoa(bin);
+};
+
+async function loadRemote({ token = ghToken() } = {}) {
+  const repo = SITE.data_repo;
+  const [fullText, list] = await Promise.all([
+    gh('GET', 'contents/full.json?ref=main', { raw: true, repo, token }),
+    gh('GET', 'contents/queue?ref=main', { repo, token }),
+  ]);
+  if (!fullText) throw new Error('아직 PC에서 첫 동기화가 되지 않았습니다. PC의 게시판을 켜 두고 1~2분 뒤 다시 시도하세요');
+  const files = (Array.isArray(list) ? list : []).filter((f) => f.name.endsWith('.json')).sort((a, b) => a.name.localeCompare(b.name));
+  const ops = [];
+  for (const f of files) {
+    const t = await gh('GET', `contents/queue/${encodeURIComponent(f.name)}?ref=main`, { raw: true, repo, token }).catch(() => null);
+    if (t) { try { ops.push({ name: f.name, op: JSON.parse(t) }); } catch { /* 깨진 파일은 PC가 정리 */ } }
+  }
+  REMOTE = { repo, full: JSON.parse(fullText), ops, base: null };
+  rebuildRemote();
+}
+
+function rebuildRemote() {
+  const base = JSON.parse(JSON.stringify(REMOTE.full));
+  const today = todayKst();
+  for (const t of base.tasks) t.derived = derive(t, t.latest_review, today);
+  for (const { op } of REMOTE.ops) { try { reduceRemote(base, op); } catch { /* 화면 반영 실패는 PC 반영에 영향 없음 */ } }
+  REMOTE.base = base;
+}
+
+// PC가 이미 만든 항목은 임시 id → 실제 id로
+function remapRemote(op) {
+  const map = REMOTE.full.id_map ?? {};
+  const r = (v) => (typeof v === 'number' && v < 0 && map[v] != null ? map[v] : v);
+  const path = String(op.path).replace(/\/(-\d+)(?=\/|\?|$)/g, (m, id) => (map[id] != null ? `/${map[id]}` : m));
+  const body = op.body && typeof op.body === 'object' && !Array.isArray(op.body)
+    ? Object.fromEntries(Object.entries(op.body).map(([k, v]) => [k, k === 'ids' && Array.isArray(v) ? v.map(r) : r(v)]))
+    : op.body;
+  return { ...op, path, body };
+}
+
+// 화면에 바로 보이도록 요청을 데이터에 미리 적용 (실제 검증·이력은 PC가 실행할 때)
+function reduceRemote(B, rawOp) {
+  const op = remapRemote(rawOp);
+  const p = op.path.split('?')[0];
+  const body = op.body ?? {};
+  const now = new Date().toISOString();
+  const today = todayKst();
+  const fin = (t) => { t.derived = derive(t, t.latest_review, today); t.pending = true; return t; };
+  const task = (id) => B.tasks.find((t) => t.id === Number(id));
+  const proj = (id) => B.projects.find((x) => x.id === Number(id)) ?? {};
+  const newTask = (id, f) => fin({
+    id, task_code: '새 업무', project_id: Number(f.project_id), project_code: proj(f.project_id).code, project_title: proj(f.project_id).title,
+    title: f.title, description: null, expected_deliverable: null, done_criteria: null, status: f.status ?? 'todo',
+    my_urgency: f.my_urgency ?? null, my_due_date: f.my_due_date ?? null, due_undecided_reason: null, my_reason: f.my_reason ?? null,
+    review_state: 'not_reviewed', external_deadline: null, external_deadline_source: null, next_action: f.next_action ?? null,
+    waiting_on: null, blocked_reason: f.blocked_reason ?? null, follow_up_date: null, visibility: 'private',
+    source_type: f.source_type ?? null, source_note: f.source_note ?? null, origin: 'manual', created_at: now, updated_at: now,
+    completed_at: null, reviews: [], activity: [], latest_review: null, mail: null,
+  });
+  let m;
+  if (op.method === 'POST' && p === '/api/tasks') { B.tasks.push(newTask(op.temp_id, body)); return { id: op.temp_id }; }
+  if ((m = p.match(/^\/api\/tasks\/(-?\d+)$/)) && op.method === 'PATCH') {
+    const t = task(m[1]);
+    if (!t) return null;
+    for (const [k, v] of Object.entries(body)) if (!['reason', 'mark_verified'].includes(k)) t[k] = v === '' ? null : v;
+    if (body.status === 'done') t.completed_at = now;
+    if (body.project_id) { t.project_code = proj(body.project_id).code; t.project_title = proj(body.project_id).title; }
+    t.updated_at = now;
+    return fin(t);
+  }
+  if ((m = p.match(/^\/api\/tasks\/(-?\d+)\/reviews$/)) && op.method === 'POST') {
+    const t = task(m[1]);
+    if (!t) return null;
+    const r = { id: -Date.now(), task_id: t.id, ...body, needs_recheck: body.needs_recheck ? 1 : 0, direct_confirmation: 0,
+      recorded_by_name: B.owner_name, my_urgency_snapshot: t.my_urgency, my_due_date_snapshot: t.my_due_date, created_at: now };
+    t.reviews.unshift(r);
+    t.latest_review = r;
+    t.review_state = r.needs_recheck ? 'recheck' : 'confirmed';
+    return fin(t);
+  }
+  if (op.method === 'POST' && p === '/api/projects') {
+    B.projects.push({ id: op.temp_id, code: String(body.code ?? '').toUpperCase(), task_prefix: String(body.task_prefix || body.code || '').toUpperCase(), title: body.title, objective: body.objective ?? null, description: body.description ?? null, status: 'active', active_count: 0, done_count: 0, candidate_count: 0 });
+    return { id: op.temp_id };
+  }
+  if ((m = p.match(/^\/api\/projects\/(-?\d+)$/)) && op.method === 'PATCH') { Object.assign(proj(m[1]), body); return { id: Number(m[1]) }; }
+  // 일정·종류
+  if (op.method === 'POST' && p === '/api/events') {
+    B.events.push({ id: op.temp_id, ...body, all_day: body.all_day ? 1 : 0, end_date: body.end_date || body.start_date, start_time: body.all_day ? null : body.start_time ?? null, end_time: body.all_day ? null : body.end_time ?? null });
+    return { id: op.temp_id };
+  }
+  if ((m = p.match(/^\/api\/events\/(-?\d+)$/))) {
+    const i = B.events.findIndex((e) => e.id === Number(m[1]));
+    if (i < 0) return { ok: true };
+    if (op.method === 'DELETE') { B.events.splice(i, 1); return { ok: true }; }
+    const e = Object.assign(B.events[i], body);
+    if (body.all_day !== undefined) e.all_day = body.all_day ? 1 : 0;
+    if (e.all_day) { e.start_time = null; e.end_time = null; }
+    return { ok: true };
+  }
+  if (p === '/api/event-types' && op.method === 'POST') {
+    B.event_types.push({ id: op.temp_id, name: body.name, color: body.color, rank: B.event_types.length + 1 });
+    return B.event_types;
+  }
+  if ((m = p.match(/^\/api\/event-types\/(-?\d+)$/))) {
+    const id = Number(m[1]);
+    if (op.method === 'DELETE') { B.event_types = B.event_types.filter((t) => t.id !== id); B.events.forEach((e) => { if (e.type_id === id) e.type_id = null; }); }
+    else Object.assign(B.event_types.find((t) => t.id === id) ?? {}, body);
+    return B.event_types;
+  }
+  // 보낸 사람 우선순위
+  const C = B.contacts;
+  if (p === '/api/contacts/place') {
+    const cat = body.category_id ?? null;
+    (body.ids ?? []).forEach((id, i) => { const c = C.contacts.find((x) => x.id === Number(id)); if (c) { c.category_id = cat; c.rank = cat === null ? null : i + 1; } });
+    return C;
+  }
+  if ((m = p.match(/^\/api\/contacts\/(-?\d+)$/))) { Object.assign(C.contacts.find((x) => x.id === Number(m[1])) ?? {}, body); return C; }
+  if (p === '/api/contact-categories' && op.method === 'POST') { C.categories.push({ id: op.temp_id, name: body.name, rank: C.categories.length + 1 }); return C; }
+  if (p === '/api/contact-categories/order') { (body.ids ?? []).forEach((id, i) => { const k = C.categories.find((x) => x.id === Number(id)); if (k) k.rank = i + 1; }); C.categories.sort((a, b) => a.rank - b.rank); return C; }
+  if ((m = p.match(/^\/api\/contact-categories\/(-?\d+)$/))) {
+    const id = Number(m[1]);
+    if (op.method === 'DELETE') { C.categories = C.categories.filter((k) => k.id !== id); C.contacts.forEach((c) => { if (c.category_id === id) { c.category_id = null; c.rank = null; } }); }
+    else Object.assign(C.categories.find((k) => k.id === id) ?? {}, body);
+    return C;
+  }
+  // 메일
+  if ((m = p.match(/^\/api\/mails\/(-?\d+)\/seen$/))) { const x = B.mails.find((y) => y.id === Number(m[1])); if (x) { x.seen = true; x.seen_at ??= now; } return x; }
+  if ((m = p.match(/^\/api\/mails\/(-?\d+)$/)) && op.method === 'PATCH') {
+    const x = B.mails.find((y) => y.id === Number(m[1]));
+    if (!x) return null;
+    Object.assign(x, body);
+    if (body.told_professor !== undefined) x.told_professor = body.told_professor ? 1 : 0;
+    const t = x.task_id ? task(x.task_id) : null;
+    if (t && body.reply_due !== undefined) { t.my_due_date = body.reply_due; fin(t); }
+    if (t && body.replied_at) { t.status = 'done'; t.completed_at = now; fin(t); }
+    if (t) t.mail = { ...x };
+    return x;
+  }
+  if ((m = p.match(/^\/api\/mails\/(-?\d+)\/reply-task$/))) {
+    const x = B.mails.find((y) => y.id === Number(m[1]));
+    if (!x) return null;
+    const t = newTask(op.temp_id, { project_id: body.project_id, title: `${x.from_name} 메일 회신: ${x.subject}`, my_urgency: body.my_urgency, my_due_date: body.reply_due, next_action: '회신 보내기', source_type: 'email' });
+    Object.assign(x, { decision: 'reply', task_id: op.temp_id, reply_due: body.reply_due ?? null, reply_plan: body.reply_plan ?? null, told_professor: body.told_professor ? 1 : 0, told_professor_at: body.told_professor_at ?? null, seen: true });
+    t.mail = { ...x };
+    B.tasks.push(t);
+    return { mail: x, task_id: op.temp_id };
+  }
+  if (p === '/api/mail/sync') return { added: 0, queued: true };
+  return { ok: true };
+}
+
+function remoteGet(path) {
+  const B = REMOTE.base;
+  const detail = (t) => (t ? { ...t } : null);
+  if (path === '/api/me') return { user: { display_name: B.owner_name, role: 'owner' }, today: todayKst(), mode: 'remote', generated_at: REMOTE.full.generated_at, publish: false };
+  if (path === '/api/tasks') return B.tasks.map(({ reviews, activity, ...t }) => t);
+  if (path === '/api/projects') return B.projects;
+  if (path === '/api/mails') return B.mails;
+  if (path === '/api/events') return B.events;
+  if (path === '/api/event-types') return B.event_types;
+  if (path === '/api/contacts') return B.contacts;
+  if (path === '/api/mail/status') return B.mail_status;
+  if (path === '/api/backups') return { last: B.backup };
+  if (path === '/api/activity') {
+    return B.tasks.flatMap((t) => (t.activity ?? []).map((a) => ({ ...a, task_code: t.task_code, task_title: t.title }))).sort((a, b) => (a.created_at < b.created_at ? 1 : -1)).slice(0, 500);
+  }
+  let m = path.match(/^\/api\/tasks\/(-?\d+)$/);
+  if (m) { const t = B.tasks.find((x) => x.id === Number(m[1])); if (!t) throw new Error('업무를 찾을 수 없습니다'); return detail(t); }
+  m = path.match(/^\/api\/mails\/(-?\d+)$/);
+  if (m) { const x = B.mails.find((y) => y.id === Number(m[1])); if (!x) throw new Error('메일을 찾을 수 없습니다'); return x; }
+  throw new Error('없는 데이터');
+}
+
+async function remoteApi(method, url, body) {
+  const path = url.split('?')[0];
+  if (method === 'GET') return remoteGet(path);
+  if (REMOTE_BLOCKED.some((re) => re.test(path))) throw new Error('이 기능은 PC의 게시판에서만 할 수 있습니다');
+  const creates = method === 'POST' && (/^\/api\/(tasks|events|projects|event-types|contact-categories)$/.test(path) || /\/reply-task$/.test(path));
+  const op = { method, path, body, temp_id: creates ? -(Date.now() * 10 + Math.floor(Math.random() * 10)) : undefined, created_at: new Date().toISOString() };
+  const name = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}.json`;
+  // 같은 저장소에 동시에 쓰면 충돌하므로 한 번에 하나씩
+  const put = remoteChain.then(() => gh('PUT', `contents/queue/${name}`, { body: { message: `원격 편집: ${method} ${path}`, content: toB64(JSON.stringify(op)), branch: 'main' } }));
+  remoteChain = put.catch(() => {});
+  await put;
+  REMOTE.ops.push({ name, op });
+  return reduceRemote(REMOTE.base, op) ?? { ok: true };
+}
+
+function remoteStatusLine() {
+  if (S.mode !== 'remote' || !REMOTE) return '';
+  const n = REMOTE.ops.length;
+  const errs = (REMOTE.full.remote_errors ?? []).filter((e) => e.at > new Date(Date.now() - 86400000).toISOString());
+  return html`<div class="remote-st"><span class="${n ? 'tx-warn' : 'tx-ok'}">${n ? `PC 반영 대기 ${n}건` : '모두 반영됨'}</span>
+    <span class="muted small">PC 동기화 ${fmtTs(REMOTE.full.generated_at)}</span>
+    ${errs.length ? html`<span class="tx-bad small" title="${errs.map((e) => `${e.path}: ${e.error}`).join('\n')}">반영 실패 ${errs.length}건</span>` : ''}</div>`;
+}
+
+function remoteConnectModal() {
+  const m = openModal(html`<h2>이 기기에서 편집하기</h2>
+    <p class="small">GitHub 키를 한 번 붙여 넣으면 이 기기에서 계속 편집할 수 있습니다. 고친 내용은 비공개 저장소에 저장되고, PC가 켜져 있으면 1분 안에 게시판에 반영됩니다.</p>
+    <ol class="small steps">
+      <li><a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noopener">GitHub 키 만들기 페이지</a>를 엽니다 (GitHub 로그인).</li>
+      <li><b>Token name</b>: 업무게시판 · <b>Expiration</b>: 원하는 기간 (예: 1년)</li>
+      <li><b>Repository access</b> → <b>Only select repositories</b> → <b>${SITE.data_repo}</b></li>
+      <li><b>Permissions</b> → Repository permissions → <b>Contents</b>: <b>Read and write</b></li>
+      <li><b>Generate token</b> → 나온 키(<code>github_pat_…</code>)를 복사해 아래에 붙여 넣기</li>
+    </ol>
+    <form id="ghf" autocomplete="off">
+      <div class="field"><label>GitHub 키</label><input name="token" type="password" required placeholder="github_pat_…" autocomplete="off"></div>
+      <p class="hint">키는 이 기기의 브라우저에만 저장됩니다. 공용 PC에서는 쓰지 마세요. 이 키로는 ${SITE.data_repo} 저장소만 읽고 쓸 수 있습니다.</p>
+      <div class="actions"><button type="button" class="ghost" data-cancel>취소</button><button class="primary" type="submit">연결</button></div>
+    </form>`);
+  $('[data-cancel]', m).addEventListener('click', closeModal);
+  $('#ghf', m).addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const token = e.target.token.value.trim();
+    e.target.token.value = '';
+    const btn = $('button[type=submit]', m);
+    btn.disabled = true;
+    btn.textContent = '확인 중…';
+    try {
+      await loadRemote({ token });
+      store.set('ghToken', token);
+      closeModal();
+      await bootRemote();
+      toast('편집 모드 — 이 기기에서 바로 고칠 수 있습니다');
+    } catch (err) {
+      toastErr(err);
+      btn.disabled = false;
+      btn.textContent = '연결';
+    }
+  });
+}
+async function bootRemote() {
+  REMOTE_ON = true;
+  const me = await api('GET', '/api/me');
+  S.me = me.user;
+  S.today = me.today;
+  S.mode = 'remote';
+  S.canPublish = false;
+  S.generatedAt = me.generated_at;
+  await loadAll();
+  route();
+}
+function remoteDisconnect() {
+  if (!confirm('이 기기에서 편집 모드를 끌까요? 저장된 GitHub 키가 이 브라우저에서 지워집니다.')) return;
+  store.set('ghToken', null);
+  location.reload();
+}
+// 다른 기기·PC에서 바뀐 내용을 1분마다 가져온다
+setInterval(async () => {
+  if (S.mode !== 'remote' || document.hidden || $('#modal-root').innerHTML) return;
+  if (main().contains(document.activeElement) && document.activeElement.matches('input, textarea, select')) return;
+  try { await loadRemote(); await loadAll(); refresh(); if (S.peek && S.peekKind === 'task') openPeek(S.peek); } catch { /* 다음에 다시 */ }
+}, 60000);
+
 // ---- GitHub 게시 ----------------------------------------------------------------
 async function publishNow() {
   if (!confirm('등록 후보를 뺀 모든 업무가 GitHub Pages에 올라가 인터넷에 공개됩니다.\n(메모와 확인 기록의 "들은 내용"은 올라가지 않습니다)\n\n지금 게시할까요?')) return;
@@ -2454,6 +2750,15 @@ $('#side-backdrop').addEventListener('click', closeSideMobile);
 window.addEventListener('hashchange', route);
 
 async function boot() {
+  if (STATIC && ghToken()) {
+    try {
+      await staticApi('GET', '/api/me');
+      if (SITE.data_repo) { await loadRemote(); return await bootRemote(); }
+    } catch (e) {
+      REMOTE_ON = false;
+      setTimeout(() => toast(`편집 모드 연결 실패: ${e.message} — 보기 모드로 엽니다`, { err: true }), 800);
+    }
+  }
   try {
     const me = await api('GET', '/api/me');
     S.me = me.user;
