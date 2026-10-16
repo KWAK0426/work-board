@@ -312,8 +312,7 @@ function renderSide() {
     </nav>
     <div class="side-foot">
       ${S.mode === 'static'
-        ? html`<div class="who"><b>${S.me.display_name || '업무 게시판'}</b><span class="muted small">읽기 전용 · ${fmtTs(S.generatedAt)} 게시</span></div>
-          ${SITE?.data_repo ? html`<button type="button" class="publish-btn edit-on" id="remote-on">✏️ 이 기기에서 편집하기</button>` : ''}`
+        ? html`<div class="who"><b>${S.me.display_name || '업무 게시판'}</b><span class="muted small">읽기 전용 · ${fmtTs(S.generatedAt)} 게시</span></div>`
         : html`<div class="who"><b>${S.me.display_name}</b><span class="muted small">${owner ? (S.mode === 'local' ? '내 PC에서 편집' : S.mode === 'remote' ? 'GitHub 페이지에서 편집 중' : '편집') : '열람 전용'}</span></div>
           ${remoteStatusLine()}
           ${S.mode === 'remote' ? html`<button type="button" class="link small" id="remote-off">이 기기 편집 모드 끄기</button>` : ''}
@@ -325,7 +324,6 @@ function renderSide() {
   $('#app').classList.remove('bare');
   mount($('#mobile-title'), html`<a class="brand" href="#/calendar"><span class="logo"></span>업무 게시판</a>`);
   $('#publish')?.addEventListener('click', publishNow);
-  $('#remote-on')?.addEventListener('click', remoteConnectModal);
   $('#remote-off')?.addEventListener('click', remoteDisconnect);
   $('#logout')?.addEventListener('click', logout);
   renderTabbar();
@@ -1160,6 +1158,8 @@ const MAX_LANES = 3;
 
 function renderCalendar() {
   const owner = isOwner() && S.mode !== 'static';
+  // 공개 페이지에서도 '추가'는 보인다 (처음 저장할 때만 키를 묻는다)
+  const editable = owner || (S.mode === 'static' && !!SITE?.data_repo);
   if (!S.cal.month) S.cal.month = S.today.slice(0, 7);
   if (!S.cal.selected) S.cal.selected = S.today;
   const [y, mo] = S.cal.month.split('-').map(Number);
@@ -1183,7 +1183,7 @@ function renderCalendar() {
       ${days.map((d, i) => html`<div class="cal-bg ${cls(d, i)}" data-date="${d}"></div>`)}
       ${days.map((d, i) => html`<div class="cal-dh ${cls(d, i)}" data-date="${d}">
         <button type="button" class="num" data-sel="${d}" aria-label="${fmtDate(d)}">${Number(d.slice(8))}</button>${mailDots(d, byDate)}
-        ${owner ? html`<button type="button" class="cal-add" data-add="${d}" aria-label="${fmtDate(d)}에 새로 만들기" title="이 날짜에 일정·업무 추가">+</button>` : ''}</div>`)}
+        ${editable && d === S.cal.selected ? html`<button type="button" class="sel-add" data-new-event="${d}" title="${fmtDate(d)}에 일정 추가">+ 추가</button>` : ''}</div>`)}
       ${placed.filter((p) => p.lane < MAX_LANES).map((p) => html`<a href="#" class="ev-bar c${p.s + 1} s${p.t - p.s + 1} l${p.lane + 1} ${p.contL ? 'cont-l' : ''} ${p.contR ? 'cont-r' : ''}"
           data-event="${p.e.id}" data-ec="${typeOf(p.e).color}" title="${typeOf(p.e).name} · ${p.e.title} · ${eventWhen(p.e)}${p.e.location ? ` · ${p.e.location}` : ''}">${p.e.title}</a>`)}
       ${days.map((d, i) => {
@@ -1214,11 +1214,12 @@ function renderCalendar() {
       <div class="day-item-top"><span class="ev-kind etype" data-ec="${typeOf(e).color}">${typeOf(e).name}</span><span class="muted small">${eventWhen(e)}</span></div>
       <div class="day-item-title">${e.title}</div>${e.location ? html`<div class="small muted">${e.location}</div>` : ''}
       ${e.note ? html`<div class="small ev-note">${e.note}</div>` : ''}</a>`;
-  const mailItem = (m) => html`<a class="day-item" href="#" data-mail="${m.id}">
-      <div class="day-item-top"><span class="md-inline"><i class="md p${mailLevel(m)}"></i></span><span class="ev-kind k-mail">받은 메일</span>${m.seen ? '' : html`<span class="new-emo">🆕</span>`}</div>
+  const mailItem = (m) => html`<a class="day-item" href="#" data-mail-note="${m.id}">
+      <div class="day-item-top"><span class="md-inline"><i class="md p${mailLevel(m)}"></i></span><span class="ev-kind k-mail">받은 메일</span>${m.priority ? urgBadge(m.priority) : ''}${m.seen ? '' : html`<span class="new-emo">🆕</span>`}</div>
       <div class="day-item-title">${m.subject}</div>
       <div class="small muted">${displaySender(m)} ${senderTag(m)}</div>
-      <div class="flags">${mailStatusPills(m)}</div></a>`;
+      ${m.summary ? html`<div class="small mn-sum">${m.summary}</div>` : ''}
+      <div class="flags">${mailStatusPills(m)}${todoProgress(m)}</div></a>`;
   const legendLevels = S.contacts.categories.length
     ? html`${S.contacts.categories.slice(0, 6).map((k, i) => html`<span><i class="md p${i + 1}"></i>${k.name}</span>`)}<span><i class="md pu"></i>미분류</span>`
     : html`<span><i class="md ps"></i>메일 온 날</span>`;
@@ -1249,13 +1250,14 @@ function renderCalendar() {
         </div>
         <aside class="cal-side">
           <section class="side-card">
-            <div class="side-day">${Number(sel.slice(5, 7))}월 ${Number(sel.slice(8))}일 ${WEEK[dowOf(sel)]}요일 <span class="muted small">${sel === S.today ? '오늘' : dday(sel)}</span></div>
+            <div class="side-day">${Number(sel.slice(5, 7))}월 ${Number(sel.slice(8))}일 ${WEEK[dowOf(sel)]}요일 <span class="muted small">${sel === S.today ? '오늘' : dday(sel)}</span>
+              ${editable ? html`<button type="button" class="primary sm side-add" data-new-event="${sel}">+ 일정 추가</button>` : ''}</div>
             ${selEvents.length ? html`<h4 class="day-sec">일정</h4><div class="day-list">${selEvents.map(eventItem)}</div>` : ''}
             ${selTasks.length ? html`<h4 class="day-sec">업무</h4><div class="day-list">${selTasks.map(taskItem)}</div>` : ''}
             ${selMails.length || selHidden ? html`<h4 class="day-sec">받은 메일</h4><div class="day-list">${selMails.map(mailItem)}</div>
               ${selHidden ? html`<p class="small muted hidden-mails">${selMails.length ? '그 외 ' : ''}메일 ${selHidden}건 — 제목·발신인 비공개</p>` : ''}` : ''}
             ${!selEvents.length && !selTasks.length && !selAll.length ? html`<p class="muted small">이 날짜에는 일정·업무·메일이 없습니다.</p>` : ''}
-            ${owner ? html`<div class="day-adds"><button type="button" class="dash-btn" data-new-event="${sel}">+ 일정</button><button type="button" class="dash-btn" data-new-task="${sel}">+ 업무</button></div>` : ''}
+            ${editable ? html`<div class="day-adds"><button type="button" class="dash-btn" data-new-event="${sel}">+ 일정</button><button type="button" class="dash-btn" data-new-task="${sel}">+ 업무</button></div>` : ''}
           </section>
           ${undated.length ? html`<section class="side-card">
             <h3>마감일 미정 <span class="muted">${undated.length}</span></h3>
@@ -1277,9 +1279,11 @@ function renderCalendar() {
       return renderCalendar();
     }
     const ne = e.target.closest('[data-new-event]');
-    if (ne) return eventModal(null, { start: ne.dataset.newEvent });
+    if (ne) return requireEdit(() => eventModal(null, { start: ne.dataset.newEvent }));
     const nt = e.target.closest('[data-new-task]');
-    if (nt) return newTaskModal({ due: nt.dataset.newTask });
+    if (nt) return requireEdit(() => newTaskModal({ due: nt.dataset.newTask }));
+    const mn = e.target.closest('[data-mail-note]');
+    if (mn) { e.preventDefault(); return mailNoteModal(mn.dataset.mailNote); }
     const add = e.target.closest('[data-add]');
     if (add) { S.cal.selected = add.dataset.add; return createChooser({ date: add.dataset.add }); }
     if (e.target.closest('[data-peek], [data-event], [data-mail]')) return;
@@ -1289,9 +1293,7 @@ function renderCalendar() {
       const d = cell.dataset.sel || cell.dataset.date;
       S.cal.selected = d;
       renderCalendar();
-      if (isPhone()) return $('.cal-side')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
-      // '+N건 더'를 누른 경우는 그날 목록만 본다
-      if (owner && !e.target.closest('.more')) eventModal(null, { start: d });
+      if (isPhone()) $('.cal-side')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
   });
   if (!owner) return;
@@ -1884,7 +1886,7 @@ function mailRow(m) {
       <div class="row-title">${m.subject}</div>
       <div class="row-sub"><span>${displaySender(m)}</span>${senderTag(m)}<span>${fmtDate(m.received_date)} 수신</span>${atts ? html`<span>첨부 ${atts}</span>` : ''}</div>
     </div>
-    <div class="row-meta">${mailStatusPills(m)}</div>
+    <div class="row-meta">${m.priority ? urgBadge(m.priority) : ''}${todoProgress(m)}${mailStatusPills(m)}</div>
   </div>`;
 }
 
@@ -2091,6 +2093,10 @@ function renderMailPeek() {
         ${atts.map((a) => fileLink(a.name, a.url, '첨부'))}
         ${m.drive_folder_url ? html`<a class="small" href="${m.drive_folder_url}" target="_blank" rel="noopener">Drive 폴더 열기 →</a>` : m.upload_state !== 'done' ? html`<span class="hint">Drive 업로드 대기 — 지금은 이 PC의 파일로 열립니다${m.upload_state === 'error' && m.upload_error ? ` (${m.upload_error})` : ''}</span>` : ''}
       </div>` : ''}
+      <section class="decision mn-box"><h3>핵심 내용·할 일 ${owner ? html`<button type="button" class="link small" data-mail-note="${m.id}">편집</button>` : ''}</h3>
+        ${m.priority ? urgBadge(m.priority) : ''}
+        ${m.summary ? html`<p class="small mn-sum">${m.summary}</p>` : html`<p class="small muted">아직 적은 내용이 없습니다.</p>`}
+        ${Array.isArray(m.todos) && m.todos.length ? html`<ul class="todo-list ro">${m.todos.map((t) => html`<li class="${t.done ? 'del' : ''}">${t.done ? '☑' : '☐'} ${t.text}</li>`)}</ul>` : ''}</section>
       <section class="decision"><h3>회신 관리</h3>${decision}</section>
       ${owner && m.snippet ? html`<details class="more-sec" open><summary>본문 미리보기</summary><p class="snippet">${m.snippet}</p></details>` : ''}
     </div>`);
@@ -2564,9 +2570,9 @@ function remoteStatusLine() {
     ${errs.length ? html`<span class="tx-bad small" title="${errs.map((e) => `${e.path}: ${e.error}`).join('\n')}">반영 실패 ${errs.length}건</span>` : ''}</div>`;
 }
 
-function remoteConnectModal() {
-  const m = openModal(html`<h2>이 기기에서 편집하기</h2>
-    <p class="small">GitHub 키를 한 번 붙여 넣으면 이 기기에서 계속 편집할 수 있습니다. 고친 내용은 비공개 저장소에 저장되고, PC가 켜져 있으면 1분 안에 게시판에 반영됩니다.</p>
+function remoteConnectModal({ then = null } = {}) {
+  const m = openModal(html`<h2>처음 한 번만: 저장 키 연결</h2>
+    <p class="small">이 기기에서 처음 저장할 때만 필요합니다. 한 번 붙여 넣으면 이 기기에서는 다시 묻지 않습니다. 고친 내용은 비공개 저장소에 저장되고, PC가 켜져 있으면 1분 안에 게시판에 반영됩니다.</p>
     <ol class="small steps">
       <li><a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noopener">GitHub 키 만들기 페이지</a>를 엽니다 (GitHub 로그인).</li>
       <li><b>Token name</b>: 업무게시판 · <b>Expiration</b>: 원하는 기간 (예: 1년)</li>
@@ -2592,7 +2598,8 @@ function remoteConnectModal() {
       store.set('ghToken', token);
       closeModal();
       await bootRemote();
-      toast('편집 모드 — 이 기기에서 바로 고칠 수 있습니다');
+      toast('연결됨 — 이제 이 기기에서 바로 저장됩니다');
+      if (then) then();
     } catch (err) {
       toastErr(err);
       btn.disabled = false;
@@ -2622,6 +2629,89 @@ setInterval(async () => {
   if (main().contains(document.activeElement) && document.activeElement.matches('input, textarea, select')) return;
   try { await loadRemote(); await loadAll(); refresh(); if (S.peek && S.peekKind === 'task') openPeek(S.peek); } catch { /* 다음에 다시 */ }
 }, 60000);
+
+// ---- 메일 상세 창: 핵심 내용·우선순위·할 일 목록 (캘린더·메일 목록에서 열기) --------------------
+function todoProgress(m) {
+  const list = Array.isArray(m.todos) ? m.todos : [];
+  if (!list.length) return '';
+  const done = list.filter((t) => t.done).length;
+  return html`<span class="meta ${done === list.length ? 'tx-ok' : ''}">할 일 ${done}/${list.length}</span>`;
+}
+function mailNoteModal(id) {
+  let m = S.mails.find((x) => x.id === Number(id));
+  if (!m) return;
+  const draft = { summary: m.summary ?? '', priority: m.priority ?? null, todos: (Array.isArray(m.todos) ? m.todos : []).map((t) => ({ ...t })) };
+  const owner = isOwner() && S.mode !== 'static';
+  // 처음 연 메일은 '읽음' 처리 (🆕 사라짐)
+  if (owner && !m.seen) api('POST', `/api/mails/${m.id}/seen`).then((x) => { upsertMail(x); refresh(); }).catch(() => {});
+  const render = () => {
+    const pdf = owner && m.pdf_file ? mailFileUrl(m, m.pdf_file, m.pdf_url) : null;
+    const box = openModal(html`<div class="sheet-h"><h2 class="mn-title">${m.subject}</h2><button type="button" class="icon-btn" data-cancel aria-label="닫기">✕</button></div>
+      <p class="small muted mn-meta">${displaySender(m)} · ${fmtDate(m.received_date)} 수신 ${senderTag(m)}
+        ${pdf ? html` · <a href="${pdf}" target="_blank" rel="noopener">PDF 보기</a>` : ''}</p>
+      <form id="mnf" autocomplete="off">
+        <div class="field"><label>우선순위</label>
+          <div class="seg" role="group" aria-label="메일 우선순위">${Object.entries(URGENCY).map(([k, v]) => html`<button type="button" class="seg-b u-${k} ${draft.priority === k ? 'on' : ''}" data-mprio="${k}" aria-pressed="${draft.priority === k ? 'true' : 'false'}">${v}</button>`)}</div></div>
+        <div class="field"><label>핵심 내용</label><textarea name="summary" rows="3" placeholder="이 메일의 요점 — 무엇을 요청했는지, 언제까지인지 등">${draft.summary}</textarea></div>
+        <div class="field"><label>할 일</label>
+          ${draft.todos.length ? html`<ul class="todo-list">${draft.todos.map((t, i) => html`<li>
+            <label class="toggle"><input type="checkbox" data-todo-done="${i}" ${t.done ? raw('checked') : ''}><span class="${t.done ? 'del' : ''}">${t.text}</span></label>
+            <button type="button" class="icon-btn sm" data-todo-del="${i}" aria-label="할 일 삭제">✕</button></li>`)}</ul>` : ''}
+          <div class="todo-add"><input name="todo" maxlength="200" placeholder="할 일을 적고 Enter (예: 원영상 폴더 확인)"><button type="button" class="ghost" data-todo-add>추가</button></div>
+        </div>
+        <div class="actions">${owner || S.mode === 'remote' ? html`<a href="#" class="small" data-open-mailpeek="${m.id}">회신 관리 · 본문 →</a>` : ''}<span class="spacer"></span>
+          <button type="button" class="ghost" data-cancel>닫기</button><button class="primary" type="submit">저장</button></div>
+      </form>`);
+    box.classList.add('mail-note');
+    const form = $('#mnf', box);
+    const keep = () => { draft.summary = form.summary.value; };
+    const addTodo = () => {
+      const v = form.todo.value.trim();
+      if (!v) return;
+      keep();
+      draft.todos.push({ text: v, done: false });
+      render();
+      $('#mnf input[name="todo"]')?.focus();
+    };
+    $$('[data-cancel]', box).forEach((b) => b.addEventListener('click', closeModal));
+    form.todo.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); addTodo(); } });
+    $('[data-todo-add]', box).addEventListener('click', addTodo);
+    box.addEventListener('click', (e) => {
+      const pr = e.target.closest('[data-mprio]');
+      if (pr) { keep(); draft.priority = draft.priority === pr.dataset.mprio ? null : pr.dataset.mprio; return render(); }
+      const del = e.target.closest('[data-todo-del]');
+      if (del) { keep(); draft.todos.splice(Number(del.dataset.todoDel), 1); return render(); }
+      const mp = e.target.closest('[data-open-mailpeek]');
+      if (mp) { e.preventDefault(); closeModal(); openMailPeek(m.id); }
+    });
+    box.addEventListener('change', (e) => {
+      const d = e.target.closest('[data-todo-done]');
+      if (d) { keep(); draft.todos[Number(d.dataset.todoDone)].done = d.checked; render(); }
+    });
+    form.addEventListener('submit', (e) => {
+      e.preventDefault();
+      keep();
+      const body = { summary: draft.summary, priority: draft.priority, todos: draft.todos };
+      requireEdit(async () => {
+        try {
+          const x = await api('PATCH', `/api/mails/${m.id}`, body);
+          upsertMail(x);
+          closeModal();
+          refresh();
+          toast('메일 메모 저장됨');
+        } catch (err) { toastErr(err); }
+      });
+    });
+  };
+  render();
+}
+
+// 공개 페이지에서 처음 저장할 때만 저장 키를 묻고, 그 뒤로는 바로 저장
+function requireEdit(fn) {
+  if (S.mode !== 'static') return fn();
+  if (!SITE?.data_repo) return toast('이 페이지에서는 저장할 수 없습니다', { err: true });
+  remoteConnectModal({ then: fn });
+}
 
 // ---- GitHub 게시 ----------------------------------------------------------------
 async function publishNow() {
@@ -2675,6 +2765,8 @@ document.addEventListener('click', async (e) => {
     } catch (err) { toastErr(err); }
     return;
   }
+  const noteEl = e.target.closest('[data-mail-note]');
+  if (noteEl && !e.target.closest('#main .page.wide')) { e.preventDefault(); return mailNoteModal(noteEl.dataset.mailNote); }
   const evEl = e.target.closest('[data-event]');
   if (evEl && !e.target.closest('.modal')) {
     e.preventDefault();
