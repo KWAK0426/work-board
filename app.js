@@ -2554,7 +2554,15 @@ async function remoteApi(method, url, body) {
   const creates = method === 'POST' && (/^\/api\/(tasks|events|projects|event-types|contact-categories)$/.test(path) || /\/reply-task$/.test(path));
   const op = { method, path, body, temp_id: creates ? -(Date.now() * 10 + Math.floor(Math.random() * 10)) : undefined, created_at: new Date().toISOString() };
   if (REMOTE.open) {
-    const r = await relayCall('POST', { action: 'op', op });
+    await ensureDevice();
+    const send = () => relayCall('POST', { action: 'op', op, device: deviceId() });
+    const r = await send().catch(async (e) => {
+      if (!e.data?.need_register) throw e;
+      // PC에서 이 기기를 지웠으면 다시 등록
+      store.set('wbDeviceOk', false);
+      await ensureDevice();
+      return send();
+    });
     REMOTE.ops.push({ name: r.qid, op });
     return reduceRemote(REMOTE.base, op) ?? { ok: true };
   }
@@ -2627,8 +2635,72 @@ async function relayCall(method, body) {
   });
   let data;
   try { data = await res.json(); } catch { throw new Error('저장 창구에 연결하지 못했습니다'); }
-  if (data && data.ok === false) throw new Error(data.error || '저장하지 못했습니다');
+  if (data && data.ok === false) throw Object.assign(new Error(data.error || '저장하지 못했습니다'), { data });
   return data;
+}
+
+// 기기 등록: 처음 4대는 바로, 그 뒤로는 게시판 주인 메일로 받은 인증 코드를 넣어야 저장할 수 있다
+function deviceId() {
+  let id = store.get('wbDevice', null);
+  if (!id) { id = `${crypto.randomUUID()}-${Math.random().toString(36).slice(2, 10)}`; store.set('wbDevice', id); }
+  return id;
+}
+function deviceName() {
+  const ua = navigator.userAgent;
+  const os = /iPhone/.test(ua) ? 'iPhone' : /iPad/.test(ua) ? 'iPad' : /Android/.test(ua) ? (/Mobile/.test(ua) ? 'Android 휴대폰' : 'Android 태블릿')
+    : /Mac OS X/.test(ua) ? 'Mac' : /Windows/.test(ua) ? 'Windows PC' : '기기';
+  const br = /Edg\//.test(ua) ? 'Edge' : /Whale\//.test(ua) ? 'Whale' : /SamsungBrowser/.test(ua) ? '삼성 인터넷' : /Chrome\//.test(ua) ? 'Chrome' : /Safari\//.test(ua) ? 'Safari' : /Firefox\//.test(ua) ? 'Firefox' : '';
+  return `${os}${br ? ` · ${br}` : ''}`;
+}
+let deviceWait = null;
+function ensureDevice() {
+  if (store.get('wbDeviceOk', false)) return Promise.resolve();
+  deviceWait ??= (async () => {
+    try {
+      await relayCall('POST', { action: 'register', device: deviceId(), name: deviceName() });
+      store.set('wbDeviceOk', true);
+    } catch (e) {
+      if (!e.data?.need_code) throw e;
+      await deviceCodeModal();
+    }
+  })().finally(() => { deviceWait = null; });
+  return deviceWait;
+}
+function deviceCodeModal() {
+  return new Promise((resolve, reject) => {
+    const m = openModal(html`<h2>새 기기 등록</h2>
+      <p class="small">이미 기기 4대가 등록돼 있어서, 이 기기에서 저장하려면 <b>게시판 주인의 메일로 가는 인증 코드</b>가 필요합니다. 한 번 등록하면 이 기기에서는 다시 묻지 않습니다.</p>
+      <p class="small muted">이 기기: ${deviceName()}</p>
+      <div class="actions"><button type="button" class="ghost" id="dv-send">인증 메일 보내기</button></div>
+      <form id="dvf" autocomplete="off">
+        <div class="field"><label>인증 코드 6자리</label><input name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]{6}" required placeholder="123456"></div>
+        <div class="actions"><button type="button" class="ghost" data-cancel>취소</button><button class="primary" type="submit">등록</button></div>
+      </form>`);
+    $('[data-cancel]', m).addEventListener('click', () => { closeModal(); reject(Object.assign(new Error('기기 등록을 취소했습니다'), { cancelled: true })); });
+    const send = $('#dv-send', m);
+    send.addEventListener('click', async () => {
+      send.disabled = true;
+      try {
+        const r = await relayCall('POST', { action: 'send_code', device: deviceId(), name: deviceName() });
+        send.textContent = '보냈습니다 — 메일 확인';
+        toast(`인증 메일을 보냈습니다 (${r.minutes ?? 10}분 안에 입력)`);
+        $('#dvf input[name="code"]', m)?.focus();
+        setTimeout(() => { send.disabled = false; send.textContent = '다시 보내기'; }, 60000);
+      } catch (e) { toastErr(e); send.disabled = false; }
+    });
+    $('#dvf', m).addEventListener('submit', async (e) => {
+      e.preventDefault();
+      const btn = $('button[type=submit]', m);
+      btn.disabled = true;
+      try {
+        await relayCall('POST', { action: 'verify', device: deviceId(), name: deviceName(), code: e.target.code.value.trim() });
+        store.set('wbDeviceOk', true);
+        closeModal();
+        toast('이 기기가 등록됐습니다 — 이제 바로 저장됩니다');
+        resolve();
+      } catch (err) { toastErr(err); btn.disabled = false; }
+    });
+  });
 }
 async function loadRelay() {
   const [snap, ops] = await Promise.all([relayCall('GET', 'snapshot'), relayCall('GET', 'ops')]);
@@ -2739,6 +2811,7 @@ function mailNoteModal(id) {
 
 // 공개 페이지에서 처음 저장할 때만 저장 키를 묻고, 그 뒤로는 바로 저장
 function requireEdit(fn) {
+  if (S.mode === 'open' && !store.get('wbDeviceOk', false)) return ensureDevice().then(fn, (e) => { if (!e?.cancelled) toastErr(e); });
   if (S.mode !== 'static') return fn();
   if (SITE?.relay_url) return toast('저장 창구에 연결하지 못해 지금은 보기만 됩니다. 잠시 후 새로고침하세요', { err: true });
   if (!SITE?.data_repo) return toast('이 페이지에서는 저장할 수 없습니다', { err: true });
