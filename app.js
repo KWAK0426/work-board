@@ -2814,7 +2814,7 @@ function requireEdit(fn) {
   if (S.mode === 'open' && !store.get('wbDeviceOk', false)) return ensureDevice().then(fn, (e) => { if (!e?.cancelled) toastErr(e); });
   if (S.mode !== 'static') return fn();
   if (SITE?.relay_url) return toast('저장 창구에 연결하지 못해 지금은 보기만 됩니다. 잠시 후 새로고침하세요', { err: true });
-  if (!SITE?.data_repo) return toast('이 페이지에서는 저장할 수 없습니다', { err: true });
+  if (!SITE?.data_repo) return toast('아직 저장 연결 전이라 지금은 보기만 됩니다', { err: true });
   remoteConnectModal({ then: fn });
 }
 
