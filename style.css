@@ -827,6 +827,4 @@ code { font-family: ui-monospace, Consolas, monospace; font-size: 12px; backgrou
 .mn-box h3 { display: flex; align-items: center; gap: 8px; }
 @media (max-width: 760px) { .sel-add { display: none; } }
 
-/* Google 로그인 저장 창구와 메시지를 주고받는 보이지 않는 틀 */
-.bridge-frame { position: fixed; left: -10px; top: -10px; width: 1px; height: 1px; border: 0; opacity: 0; pointer-events: none; }
 .day-item-top .ev-edit { margin-left: auto; font-size: 12px; color: var(--accent, #5b5bd6); font-weight: 600; white-space: nowrap; }

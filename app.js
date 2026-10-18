@@ -313,7 +313,7 @@ function renderSide() {
     <div class="side-foot">
       ${S.mode === 'static'
         ? html`<div class="who"><b>${S.me.display_name || '업무 게시판'}</b><span class="muted small">읽기 전용 · ${fmtTs(S.generatedAt)} 게시</span></div>`
-        : html`<div class="who"><b>${S.me.display_name}</b><span class="muted small">${owner ? (S.mode === 'local' ? '내 PC에서 편집' : S.mode === 'remote' ? 'GitHub 페이지에서 편집 중' : S.mode === 'open' ? 'Google 로그인으로 수정 중' : '편집') : '열람 전용'}</span></div>
+        : html`<div class="who"><b>${S.me.display_name}</b><span class="muted small">${owner ? (S.mode === 'local' ? '내 PC에서 편집' : S.mode === 'remote' ? 'GitHub 페이지에서 편집 중' : '편집') : S.mode === 'open' ? '캘린더는 누구나 수정할 수 있습니다' : '열람 전용'}</span></div>
           ${remoteStatusLine()}
           ${S.mode === 'remote' ? html`<button type="button" class="link small" id="remote-off">이 기기 편집 모드 끄기</button>` : ''}
           ${S.canPublish ? html`<button type="button" class="publish-btn" id="publish">GitHub에 게시</button>` : ''}
@@ -1158,8 +1158,8 @@ const MAX_LANES = 3;
 
 function renderCalendar() {
   const owner = isOwner() && S.mode !== 'static';
-  // 공개 페이지에서도 '추가'는 보인다 (처음 저장할 때만 키를 묻는다)
-  const editable = owner || (S.mode === 'static' && !!(SITE?.relay_url || SITE?.data_repo));
+  // 공개 페이지에서도 일정 '추가'·'수정'은 누구나
+  const editable = calEdit() || (S.mode === 'static' && !!(SITE?.relay_url || SITE?.data_repo));
   if (!S.cal.month) S.cal.month = S.today.slice(0, 7);
   if (!S.cal.selected) S.cal.selected = S.today;
   const [y, mo] = S.cal.month.split('-').map(Number);
@@ -1257,7 +1257,7 @@ function renderCalendar() {
             ${selMails.length || selHidden ? html`<h4 class="day-sec">받은 메일</h4><div class="day-list">${selMails.map(mailItem)}</div>
               ${selHidden ? html`<p class="small muted hidden-mails">${selMails.length ? '그 외 ' : ''}메일 ${selHidden}건 — 제목·발신인 비공개</p>` : ''}` : ''}
             ${!selEvents.length && !selTasks.length && !selAll.length ? html`<p class="muted small">이 날짜에는 일정·업무·메일이 없습니다.</p>` : ''}
-            ${editable ? html`<div class="day-adds"><button type="button" class="dash-btn" data-new-event="${sel}">+ 일정</button><button type="button" class="dash-btn" data-new-task="${sel}">+ 업무</button></div>` : ''}
+            ${editable ? html`<div class="day-adds"><button type="button" class="dash-btn" data-new-event="${sel}">+ 일정</button>${owner ? html`<button type="button" class="dash-btn" data-new-task="${sel}">+ 업무</button>` : ''}</div>` : ''}
           </section>
           ${undated.length ? html`<section class="side-card">
             <h3>마감일 미정 <span class="muted">${undated.length}</span></h3>
@@ -1490,7 +1490,7 @@ function bindEventQuick(root) {
 // ---- 일정 추가·수정 창: 종류 → 핵심 제목 → 기간 → 시간 → 메모 ----
 async function reloadEvents() { S.events = await api('GET', '/api/events'); }
 function eventModal(ev = null, { start = S.today, end = null, draft = null } = {}) {
-  const owner = isOwner() && S.mode !== 'static';
+  const owner = calEdit();
   if (ev && !owner) {
     const ty = typeOf(ev);
     const m = openModal(html`<h2>${ev.title}</h2>
@@ -1502,7 +1502,7 @@ function eventModal(ev = null, { start = S.today, end = null, draft = null } = {
       </div><div class="actions"><button type="button" class="ghost" data-cancel>닫기</button>
         ${SITE?.relay_url || SITE?.data_repo ? html`<button type="button" class="primary" data-edit>✎ 수정</button>` : ''}</div>`);
     $('[data-cancel]', m).addEventListener('click', closeModal);
-    // 공개 페이지: Google 로그인(필요하면 로그인 창) 뒤 바로 수정 화면
+    // 공개 페이지가 창구에 연결 못 한 채 열렸을 때: 다시 연결해 보고 수정 화면
     $('[data-edit]', m)?.addEventListener('click', () => { closeModal(); requireEdit(() => eventModal(S.events.find((x) => x.id === ev.id) ?? ev)); });
     return;
   }
@@ -1510,7 +1510,7 @@ function eventModal(ev = null, { start = S.today, end = null, draft = null } = {
   const e = draft ?? ev ?? { title: '', type_id: null, start_date: start, end_date: end ?? start, all_day: 1, start_time: null, end_time: null, location: '', note: '' };
   const m = openModal(html`<h2>${ev ? '일정 수정' : '일정 추가'} <span class="muted small">${fmtDate(e.start_date)}${e.end_date !== e.start_date ? ` ~ ${fmtDate(e.end_date)}` : ''}</span></h2>
     <form id="evf" autocomplete="off">
-      <div class="field"><label>종류 <button type="button" class="link small" data-types>종류·색 편집</button></label>
+      <div class="field"><label>종류 ${S.mode !== 'open' ? html`<button type="button" class="link small" data-types>종류·색 편집</button>` : ''}</label>
         <div class="choices type-choices">
           ${S.eventTypes.map((t) => html`<label class="choice"><input type="radio" name="type_id" value="${t.id}" ${t.id === e.type_id ? raw('checked') : ''}><span class="tchip" data-ec="${t.color}"><i class="tdot"></i>${t.name}</span></label>`)}
         </div></div>
@@ -1547,7 +1547,7 @@ function eventModal(ev = null, { start = S.today, end = null, draft = null } = {
     const f = Object.fromEntries(new FormData(form));
     return { ...f, type_id: typeChecked() ? Number(typeChecked().value) : null, all_day: !!f.all_day, end_date: f.end_date || f.start_date };
   };
-  $('[data-types]', m).addEventListener('click', () => {
+  $('[data-types]', m)?.addEventListener('click', () => {
     const d = { ...collect(), all_day: form.all_day.checked ? 1 : 0 };
     closeModal();
     typeManager({ onClose: () => eventModal(ev, { draft: d }) });
@@ -2532,7 +2532,7 @@ function reduceRemote(B, rawOp) {
 function remoteGet(path) {
   const B = REMOTE.base;
   const detail = (t) => (t ? { ...t } : null);
-  if (path === '/api/me') return { user: { display_name: B.owner_name, role: 'owner' }, today: todayKst(), mode: REMOTE.open ? 'open' : 'remote', generated_at: REMOTE.full.generated_at, publish: false };
+  if (path === '/api/me') return { user: { display_name: B.owner_name, role: REMOTE.open ? 'viewer' : 'owner' }, today: todayKst(), mode: REMOTE.open ? 'open' : 'remote', generated_at: REMOTE.full.generated_at, publish: false };
   if (path === '/api/tasks') return B.tasks.map(({ reviews, activity, ...t }) => t);
   if (path === '/api/projects') return B.projects;
   if (path === '/api/mails') return B.mails;
@@ -2558,8 +2558,7 @@ async function remoteApi(method, url, body) {
   const creates = method === 'POST' && (/^\/api\/(tasks|events|projects|event-types|contact-categories)$/.test(path) || /\/reply-task$/.test(path));
   const op = { method, path, body, temp_id: creates ? -(Date.now() * 10 + Math.floor(Math.random() * 10)) : undefined, created_at: new Date().toISOString() };
   if (REMOTE.open) {
-    if (!bridgeAlive()) await connectFrame();
-    const r = await bridgeCall({ action: 'op', op });
+    const r = await relayCall('POST', { action: 'op', op });
     REMOTE.ops.push({ name: r.qid, op });
     return reduceRemote(REMOTE.base, op) ?? { ok: true };
   }
@@ -2618,57 +2617,26 @@ function remoteConnectModal({ then = null } = {}) {
     }
   });
 }
-// ---- Google 로그인만 하면 누구나 수정 ------------------------------------------------
-// 브라우저에 Google 로그인이 되어 있으면 Apps Script 저장 창구(?ui=bridge)를 보이지 않는 틀로 열어 메시지로 주고받는다.
-// 저장하면 요청이 창구(Drive 폴더)에 쌓이고, PC가 1분마다 실행한 뒤 최신 데이터를 그 폴더에 다시 쓴다.
-// 틀이 막히는 브라우저(로그인 안 됨·제3자 쿠키 차단)는 저장할 때 Google 로그인 작은 창을 띄운다.
-// 보낸 사람 목록·등록 후보·비공개 메일은 여기서 다루지 않는다 (PC 전용).
-const OPEN_BLOCKED = [/^\/api\/contact/, /^\/api\/mail\/sync/];
-const BRIDGE_ORIGIN = /^https:\/\/[a-z0-9-]+-script\.googleusercontent\.com$/;
-const LOCAL_BRIDGE = ['127.0.0.1', 'localhost'].includes(location.hostname);
-const bridge = { win: null, origin: null, frame: null, popup: null, seq: 0, waits: new Map(), onReady: null };
-window.addEventListener('message', (ev) => {
-  const ok = BRIDGE_ORIGIN.test(ev.origin) || (LOCAL_BRIDGE && /^http:\/\/(127\.0\.0\.1|localhost):\d+$/.test(ev.origin));
-  if (!ok || !ev.data || typeof ev.data !== 'object') return;
-  if (ev.data.wb === 'ready') { bridge.win = ev.source; bridge.origin = ev.origin; bridge.onReady?.(); }
-  if (ev.data.wb === 'res') { const w = bridge.waits.get(ev.data.id); if (w) { bridge.waits.delete(ev.data.id); w(ev.data.result); } }
-});
-const bridgeUrl = (mode) => `${SITE.relay_url}?ui=bridge&mode=${mode}`;
-const bridgeAlive = () => !!bridge.win && !bridge.win.closed;
-function waitBridge(ms) {
-  return new Promise((resolve, reject) => {
-    const t = setTimeout(() => { bridge.onReady = null; reject(new Error('Google 로그인 연결을 기다리다 멈췄습니다')); }, ms);
-    bridge.onReady = () => { clearTimeout(t); bridge.onReady = null; resolve(); };
+// ---- 누구나 캘린더 수정 (로그인·키 없음) ------------------------------------------------
+// 공개 페이지에서는 캘린더의 일정 추가·수정·삭제와 메일 메모(핵심 내용·우선순위·할 일)만 누구나 할 수 있다.
+// 저장하면 요청이 Apps Script 저장 창구(Drive 폴더)에 쌓이고, PC가 1분마다 실행한 뒤 최신 데이터를 그 폴더에 다시 쓴다.
+// 업무·프로젝트·보낸 사람 등 나머지는 PC에서만 (창구와 PC 양쪽에서 막는다).
+const OPEN_BLOCKED = [/^\/api\/(?!events|mails\/\d+$)/];
+async function relayCall(method, body) {
+  const url = SITE.relay_url;
+  const res = await fetch(method === 'GET' ? `${url}?action=${body}` : url, {
+    method, cache: 'no-store', redirect: 'follow',
+    // text/plain: 브라우저의 사전 확인(CORS preflight) 없이 바로 보낸다
+    headers: method === 'POST' ? { 'Content-Type': 'text/plain;charset=utf-8' } : undefined,
+    body: method === 'POST' ? JSON.stringify(body) : undefined,
   });
-}
-// 보이지 않는 틀: Google 로그인이 되어 있으면 몇 초 안에 연결된다
-async function connectFrame() {
-  if (bridgeAlive()) return true;
-  const f = document.createElement('iframe');
-  f.src = bridgeUrl('frame');
-  f.title = '저장 창구';
-  f.className = 'bridge-frame';
-  f.setAttribute('aria-hidden', 'true');
-  document.body.append(f);
-  try { await waitBridge(12000); bridge.frame = f; return true; } catch { f.remove(); return false; }
-}
-// 로그인 작은 창: 버튼을 누른 그 순간에 열어야 브라우저가 막지 않는다
-function connectPopup() {
-  bridge.popup = window.open(bridgeUrl('popup'), 'wb-bridge', 'width=460,height=640');
-  if (!bridge.popup) return Promise.reject(new Error('팝업이 막혀 있습니다. 주소창 오른쪽에서 이 사이트의 팝업을 허용해 주세요'));
-  return waitBridge(180000);
-}
-function bridgeCall(req) {
-  if (!bridgeAlive()) return Promise.reject(Object.assign(new Error('Google 로그인 연결이 끊겼습니다. 다시 저장을 눌러 주세요'), { needLogin: true }));
-  const id = ++bridge.seq;
-  return new Promise((resolve, reject) => {
-    const t = setTimeout(() => { bridge.waits.delete(id); reject(new Error('저장 창구가 응답하지 않습니다. 잠시 후 다시 시도하세요')); }, 30000);
-    bridge.waits.set(id, (r) => { clearTimeout(t); if (r && r.ok === false) reject(new Error(r.error || '저장하지 못했습니다')); else resolve(r); });
-    bridge.win.postMessage({ wb: 'req', id, req }, bridge.origin);
-  });
+  let data;
+  try { data = await res.json(); } catch { throw new Error('저장 창구에 연결하지 못했습니다'); }
+  if (data && data.ok === false) throw new Error(data.error || '저장하지 못했습니다');
+  return data;
 }
 async function loadRelay() {
-  const r = await bridgeCall({ action: 'load' });
+  const r = await relayCall('GET', 'load');
   let snap = null;
   try { snap = JSON.parse(r.snapshot || '{}'); } catch { snap = null; }
   // PC가 아직 한 번도 올리지 않았으면 공개 데이터(data.json)에서 시작
@@ -2676,47 +2644,18 @@ async function loadRelay() {
   REMOTE = { open: true, full, ops: (Array.isArray(r.ops) ? r.ops : []).map((op) => ({ name: op.qid, op })), base: null };
   rebuildRemote();
 }
-// 로그인 안 된 브라우저에서 저장하려 할 때: 페이지 안 창으로 안내 → 새 탭에서 Google 로그인 → 이 탭으로 돌아오면 자동으로 이어서
-// (Google 로그인 화면은 다른 페이지 안에 넣을 수 없어서 로그인만 새 탭에서 한다)
-function loginAndEdit(fn) {
-  let busy = false;
-  let done = false;
-  const m = openModal(html`<h2>Google 로그인이 필요합니다</h2>
-    <p class="small">이 페이지에서 바로 저장하려면 이 브라우저에 Google 로그인이 되어 있어야 합니다. 어떤 Google 계정이든 괜찮습니다.</p>
-    <p class="small muted" id="g-state">로그인한 뒤 이 탭으로 돌아오면 자동으로 이어집니다.</p>
-    <div class="actions"><button type="button" class="link small" id="g-popup" title="새 탭으로 해도 안 될 때 (일부 브라우저)">작은 창으로 연결</button><span class="spacer"></span>
-      <button type="button" class="ghost" data-cancel>취소</button><button type="button" class="primary" id="g-login">Google 로그인 (새 탭)</button></div>`);
-  const state = (t) => { const el = $('#g-state', m); if (el) el.textContent = t; };
-  const finish = async () => {
-    done = true;
-    window.removeEventListener('focus', attempt);
-    document.removeEventListener('visibilitychange', attempt);
-    closeModal();
+// 공개 페이지가 창구에 연결 못 한 채 열렸을 때: 저장하려 하면 다시 연결해 보고 이어서
+async function connectAndEdit(fn) {
+  try {
     await loadRelay();
     await bootRemote();
-    toast('연결됨 — 이제 바로 저장됩니다');
     if (fn) fn();
-  };
-  async function attempt() {
-    if (done || busy || document.hidden || !m.isConnected) return;
-    busy = true;
-    state('Google 로그인 확인 중…');
-    const ok = await connectFrame();
-    busy = false;
-    if (ok) return finish().catch(toastErr);
-    state('아직 로그인이 확인되지 않습니다. 로그인한 뒤 이 탭으로 돌아오세요.');
+  } catch (e) {
+    toast(`저장 창구에 연결하지 못했습니다 (${e.message}). 잠시 후 새로고침하세요`, { err: true });
   }
-  window.addEventListener('focus', attempt);
-  document.addEventListener('visibilitychange', attempt);
-  $('[data-cancel]', m).addEventListener('click', () => { done = true; window.removeEventListener('focus', attempt); document.removeEventListener('visibilitychange', attempt); closeModal(); });
-  $('#g-login', m).addEventListener('click', () => { window.open('https://accounts.google.com/', '_blank', 'noopener'); state('새 탭에서 로그인한 뒤 이 탭으로 돌아오세요.'); });
-  // 제3자 쿠키를 막는 브라우저(사파리 등)는 작은 창으로 연결해야 한다
-  $('#g-popup', m).addEventListener('click', () => {
-    const wait = connectPopup();
-    state('작은 창에서 로그인하면 바로 이어집니다.');
-    wait.then(() => finish()).catch(toastErr);
-  });
 }
+// 캘린더 수정 가능: 이 PC의 게시판이거나, 공개 페이지(누구나)
+const calEdit = () => (isOwner() && S.mode !== 'static') || S.mode === 'open';
 
 async function bootRemote() {
   REMOTE_ON = true;
@@ -2817,11 +2756,10 @@ function mailNoteModal(id) {
   render();
 }
 
-// 공개 페이지: Google 로그인이 되어 있으면 바로 저장, 아니면 저장할 때 로그인 창을 띄운다
+// 공개 페이지: 캘린더 수정은 누구나 바로 저장 (창구에 연결 못 했으면 다시 연결해 보고 이어서)
 function requireEdit(fn) {
-  if (S.mode === 'open' && !bridgeAlive()) return loginAndEdit(fn);
   if (S.mode !== 'static') return fn();
-  if (SITE?.relay_url) return loginAndEdit(fn);
+  if (SITE?.relay_url) return connectAndEdit(fn);
   if (!SITE?.data_repo) return toast('아직 저장 연결 전이라 지금은 보기만 됩니다', { err: true });
   remoteConnectModal({ then: fn });
 }
@@ -2958,8 +2896,7 @@ async function boot() {
   if (STATIC) {
     try {
       await staticApi('GET', '/api/me');
-      // Google 로그인이 되어 있으면 바로 수정 모드, 아니면 보기 모드 (저장하려 할 때 로그인 창)
-      if (SITE.relay_url && await connectFrame()) { await loadRelay(); return await bootRemote(); }
+      if (SITE.relay_url) { await loadRelay(); return await bootRemote(); }
     } catch (e) {
       REMOTE_ON = false;
       setTimeout(() => toast(`저장 창구 연결 실패: ${e.message} — 보기 모드로 엽니다`, { err: true }), 800);
