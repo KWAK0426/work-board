@@ -2676,16 +2676,46 @@ async function loadRelay() {
   REMOTE = { open: true, full, ops: (Array.isArray(r.ops) ? r.ops : []).map((op) => ({ name: op.qid, op })), base: null };
   rebuildRemote();
 }
-// 로그인 안 된 브라우저에서 저장하려 할 때: Google 로그인 창 → 연결되면 하던 일을 이어서
+// 로그인 안 된 브라우저에서 저장하려 할 때: 페이지 안 창으로 안내 → 새 탭에서 Google 로그인 → 이 탭으로 돌아오면 자동으로 이어서
+// (Google 로그인 화면은 다른 페이지 안에 넣을 수 없어서 로그인만 새 탭에서 한다)
 function loginAndEdit(fn) {
-  const wait = connectPopup();
-  toast('Google 로그인 창에서 로그인하면 바로 이어집니다');
-  wait.then(async () => {
+  let busy = false;
+  let done = false;
+  const m = openModal(html`<h2>Google 로그인이 필요합니다</h2>
+    <p class="small">이 페이지에서 바로 저장하려면 이 브라우저에 Google 로그인이 되어 있어야 합니다. 어떤 Google 계정이든 괜찮습니다.</p>
+    <p class="small muted" id="g-state">로그인한 뒤 이 탭으로 돌아오면 자동으로 이어집니다.</p>
+    <div class="actions"><button type="button" class="link small" id="g-popup" title="새 탭으로 해도 안 될 때 (일부 브라우저)">작은 창으로 연결</button><span class="spacer"></span>
+      <button type="button" class="ghost" data-cancel>취소</button><button type="button" class="primary" id="g-login">Google 로그인 (새 탭)</button></div>`);
+  const state = (t) => { const el = $('#g-state', m); if (el) el.textContent = t; };
+  const finish = async () => {
+    done = true;
+    window.removeEventListener('focus', attempt);
+    document.removeEventListener('visibilitychange', attempt);
+    closeModal();
     await loadRelay();
     await bootRemote();
     toast('연결됨 — 이제 바로 저장됩니다');
     if (fn) fn();
-  }).catch(toastErr);
+  };
+  async function attempt() {
+    if (done || busy || document.hidden || !m.isConnected) return;
+    busy = true;
+    state('Google 로그인 확인 중…');
+    const ok = await connectFrame();
+    busy = false;
+    if (ok) return finish().catch(toastErr);
+    state('아직 로그인이 확인되지 않습니다. 로그인한 뒤 이 탭으로 돌아오세요.');
+  }
+  window.addEventListener('focus', attempt);
+  document.addEventListener('visibilitychange', attempt);
+  $('[data-cancel]', m).addEventListener('click', () => { done = true; window.removeEventListener('focus', attempt); document.removeEventListener('visibilitychange', attempt); closeModal(); });
+  $('#g-login', m).addEventListener('click', () => { window.open('https://accounts.google.com/', '_blank', 'noopener'); state('새 탭에서 로그인한 뒤 이 탭으로 돌아오세요.'); });
+  // 제3자 쿠키를 막는 브라우저(사파리 등)는 작은 창으로 연결해야 한다
+  $('#g-popup', m).addEventListener('click', () => {
+    const wait = connectPopup();
+    state('작은 창에서 로그인하면 바로 이어집니다.');
+    wait.then(() => finish()).catch(toastErr);
+  });
 }
 
 async function bootRemote() {
