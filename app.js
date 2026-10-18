@@ -1210,8 +1210,8 @@ function renderCalendar() {
       ${e.kind === 'other' ? html`<div class="small muted">내 마감일 ${t.my_due_date ? fmtDate(t.my_due_date) : '미정'} · ${dueDiffText(t.derived.due_diff_days)}</div>` : ''}
     </a>`;
   };
-  const eventItem = (e) => html`<a class="day-item" href="#" data-event="${e.id}">
-      <div class="day-item-top"><span class="ev-kind etype" data-ec="${typeOf(e).color}">${typeOf(e).name}</span><span class="muted small">${eventWhen(e)}</span></div>
+  const eventItem = (e) => html`<a class="day-item" href="#" data-event="${e.id}" title="${editable ? '눌러서 수정·삭제' : '눌러서 자세히 보기'}">
+      <div class="day-item-top"><span class="ev-kind etype" data-ec="${typeOf(e).color}">${typeOf(e).name}</span><span class="muted small">${eventWhen(e)}</span>${editable ? html`<span class="ev-edit">✎ 수정</span>` : ''}</div>
       <div class="day-item-title">${e.title}</div>${e.location ? html`<div class="small muted">${e.location}</div>` : ''}
       ${e.note ? html`<div class="small ev-note">${e.note}</div>` : ''}</a>`;
   const mailItem = (m) => html`<a class="day-item" href="#" data-mail-note="${m.id}">
@@ -1498,8 +1498,12 @@ function eventModal(ev = null, { start = S.today, end = null, draft = null } = {
         <div class="prop"><div class="prop-k">종류</div><div class="prop-v"><span class="ev-kind etype" data-ec="${ty.color}">${ty.name}</span></div></div>
         <div class="prop"><div class="prop-k">일시</div><div class="prop-v">${eventWhen(ev)}</div></div>
         ${ev.location ? html`<div class="prop"><div class="prop-k">장소</div><div class="prop-v">${ev.location}</div></div>` : ''}
-      </div><div class="actions"><button type="button" class="primary" data-cancel>닫기</button></div>`);
+      ${ev.note ? html`<p class="small ev-note">${ev.note}</p>` : ''}
+      </div><div class="actions"><button type="button" class="ghost" data-cancel>닫기</button>
+        ${SITE?.relay_url || SITE?.data_repo ? html`<button type="button" class="primary" data-edit>✎ 수정</button>` : ''}</div>`);
     $('[data-cancel]', m).addEventListener('click', closeModal);
+    // 공개 페이지: Google 로그인(필요하면 로그인 창) 뒤 바로 수정 화면
+    $('[data-edit]', m)?.addEventListener('click', () => { closeModal(); requireEdit(() => eventModal(S.events.find((x) => x.id === ev.id) ?? ev)); });
     return;
   }
   if (!owner) return;
