@@ -1159,7 +1159,7 @@ const MAX_LANES = 3;
 function renderCalendar() {
   const owner = isOwner() && S.mode !== 'static';
   // 공개 페이지에서도 '추가'는 보인다 (처음 저장할 때만 키를 묻는다)
-  const editable = owner || (S.mode === 'static' && !!SITE?.data_repo);
+  const editable = owner || (S.mode === 'static' && !!(SITE?.relay_url || SITE?.data_repo));
   if (!S.cal.month) S.cal.month = S.today.slice(0, 7);
   if (!S.cal.selected) S.cal.selected = S.today;
   const [y, mo] = S.cal.month.split('-').map(Number);
@@ -2554,15 +2554,8 @@ async function remoteApi(method, url, body) {
   const creates = method === 'POST' && (/^\/api\/(tasks|events|projects|event-types|contact-categories)$/.test(path) || /\/reply-task$/.test(path));
   const op = { method, path, body, temp_id: creates ? -(Date.now() * 10 + Math.floor(Math.random() * 10)) : undefined, created_at: new Date().toISOString() };
   if (REMOTE.open) {
-    await ensureDevice();
-    const send = () => relayCall('POST', { action: 'op', op, device: deviceId() });
-    const r = await send().catch(async (e) => {
-      if (!e.data?.need_register) throw e;
-      // PC에서 이 기기를 지웠으면 다시 등록
-      store.set('wbDeviceOk', false);
-      await ensureDevice();
-      return send();
-    });
+    if (!bridgeAlive()) await connectFrame();
+    const r = await bridgeCall({ action: 'op', op });
     REMOTE.ops.push({ name: r.qid, op });
     return reduceRemote(REMOTE.base, op) ?? { ok: true };
   }
@@ -2621,93 +2614,74 @@ function remoteConnectModal({ then = null } = {}) {
     }
   });
 }
-// ---- 누구나 수정 (키 없음) ---------------------------------------------------------
-// 저장하면 요청이 Google Apps Script 저장 창구에 쌓이고, PC가 1분마다 가져가 실행한 뒤 최신 데이터를 다시 올린다.
+// ---- Google 로그인만 하면 누구나 수정 ------------------------------------------------
+// 브라우저에 Google 로그인이 되어 있으면 Apps Script 저장 창구(?ui=bridge)를 보이지 않는 틀로 열어 메시지로 주고받는다.
+// 저장하면 요청이 창구(Drive 폴더)에 쌓이고, PC가 1분마다 실행한 뒤 최신 데이터를 그 폴더에 다시 쓴다.
+// 틀이 막히는 브라우저(로그인 안 됨·제3자 쿠키 차단)는 저장할 때 Google 로그인 작은 창을 띄운다.
 // 보낸 사람 목록·등록 후보·비공개 메일은 여기서 다루지 않는다 (PC 전용).
 const OPEN_BLOCKED = [/^\/api\/contact/, /^\/api\/mail\/sync/];
-async function relayCall(method, body) {
-  const url = SITE.relay_url;
-  const res = await fetch(method === 'GET' ? `${url}?action=${body}` : url, {
-    method, cache: 'no-store', redirect: 'follow',
-    // text/plain: 브라우저의 사전 확인(CORS preflight) 없이 바로 보낸다
-    headers: method === 'POST' ? { 'Content-Type': 'text/plain;charset=utf-8' } : undefined,
-    body: method === 'POST' ? JSON.stringify(body) : undefined,
-  });
-  let data;
-  try { data = await res.json(); } catch { throw new Error('저장 창구에 연결하지 못했습니다'); }
-  if (data && data.ok === false) throw Object.assign(new Error(data.error || '저장하지 못했습니다'), { data });
-  return data;
-}
-
-// 기기 등록: 처음 4대는 바로, 그 뒤로는 게시판 주인 메일로 받은 인증 코드를 넣어야 저장할 수 있다
-function deviceId() {
-  let id = store.get('wbDevice', null);
-  if (!id) { id = `${crypto.randomUUID()}-${Math.random().toString(36).slice(2, 10)}`; store.set('wbDevice', id); }
-  return id;
-}
-function deviceName() {
-  const ua = navigator.userAgent;
-  const os = /iPhone/.test(ua) ? 'iPhone' : /iPad/.test(ua) ? 'iPad' : /Android/.test(ua) ? (/Mobile/.test(ua) ? 'Android 휴대폰' : 'Android 태블릿')
-    : /Mac OS X/.test(ua) ? 'Mac' : /Windows/.test(ua) ? 'Windows PC' : '기기';
-  const br = /Edg\//.test(ua) ? 'Edge' : /Whale\//.test(ua) ? 'Whale' : /SamsungBrowser/.test(ua) ? '삼성 인터넷' : /Chrome\//.test(ua) ? 'Chrome' : /Safari\//.test(ua) ? 'Safari' : /Firefox\//.test(ua) ? 'Firefox' : '';
-  return `${os}${br ? ` · ${br}` : ''}`;
-}
-let deviceWait = null;
-function ensureDevice() {
-  if (store.get('wbDeviceOk', false)) return Promise.resolve();
-  deviceWait ??= (async () => {
-    try {
-      await relayCall('POST', { action: 'register', device: deviceId(), name: deviceName() });
-      store.set('wbDeviceOk', true);
-    } catch (e) {
-      if (!e.data?.need_code) throw e;
-      await deviceCodeModal();
-    }
-  })().finally(() => { deviceWait = null; });
-  return deviceWait;
-}
-function deviceCodeModal() {
+const BRIDGE_ORIGIN = /^https:\/\/[a-z0-9-]+-script\.googleusercontent\.com$/;
+const LOCAL_BRIDGE = ['127.0.0.1', 'localhost'].includes(location.hostname);
+const bridge = { win: null, origin: null, frame: null, popup: null, seq: 0, waits: new Map(), onReady: null };
+window.addEventListener('message', (ev) => {
+  const ok = BRIDGE_ORIGIN.test(ev.origin) || (LOCAL_BRIDGE && /^http:\/\/(127\.0\.0\.1|localhost):\d+$/.test(ev.origin));
+  if (!ok || !ev.data || typeof ev.data !== 'object') return;
+  if (ev.data.wb === 'ready') { bridge.win = ev.source; bridge.origin = ev.origin; bridge.onReady?.(); }
+  if (ev.data.wb === 'res') { const w = bridge.waits.get(ev.data.id); if (w) { bridge.waits.delete(ev.data.id); w(ev.data.result); } }
+});
+const bridgeUrl = (mode) => `${SITE.relay_url}?ui=bridge&mode=${mode}`;
+const bridgeAlive = () => !!bridge.win && !bridge.win.closed;
+function waitBridge(ms) {
   return new Promise((resolve, reject) => {
-    const m = openModal(html`<h2>새 기기 등록</h2>
-      <p class="small">이미 기기 4대가 등록돼 있어서, 이 기기에서 저장하려면 <b>게시판 주인의 메일로 가는 인증 코드</b>가 필요합니다. 한 번 등록하면 이 기기에서는 다시 묻지 않습니다.</p>
-      <p class="small muted">이 기기: ${deviceName()}</p>
-      <div class="actions"><button type="button" class="ghost" id="dv-send">인증 메일 보내기</button></div>
-      <form id="dvf" autocomplete="off">
-        <div class="field"><label>인증 코드 6자리</label><input name="code" inputmode="numeric" autocomplete="one-time-code" maxlength="6" pattern="[0-9]{6}" required placeholder="123456"></div>
-        <div class="actions"><button type="button" class="ghost" data-cancel>취소</button><button class="primary" type="submit">등록</button></div>
-      </form>`);
-    $('[data-cancel]', m).addEventListener('click', () => { closeModal(); reject(Object.assign(new Error('기기 등록을 취소했습니다'), { cancelled: true })); });
-    const send = $('#dv-send', m);
-    send.addEventListener('click', async () => {
-      send.disabled = true;
-      try {
-        const r = await relayCall('POST', { action: 'send_code', device: deviceId(), name: deviceName() });
-        send.textContent = '보냈습니다 — 메일 확인';
-        toast(`인증 메일을 보냈습니다 (${r.minutes ?? 10}분 안에 입력)`);
-        $('#dvf input[name="code"]', m)?.focus();
-        setTimeout(() => { send.disabled = false; send.textContent = '다시 보내기'; }, 60000);
-      } catch (e) { toastErr(e); send.disabled = false; }
-    });
-    $('#dvf', m).addEventListener('submit', async (e) => {
-      e.preventDefault();
-      const btn = $('button[type=submit]', m);
-      btn.disabled = true;
-      try {
-        await relayCall('POST', { action: 'verify', device: deviceId(), name: deviceName(), code: e.target.code.value.trim() });
-        store.set('wbDeviceOk', true);
-        closeModal();
-        toast('이 기기가 등록됐습니다 — 이제 바로 저장됩니다');
-        resolve();
-      } catch (err) { toastErr(err); btn.disabled = false; }
-    });
+    const t = setTimeout(() => { bridge.onReady = null; reject(new Error('Google 로그인 연결을 기다리다 멈췄습니다')); }, ms);
+    bridge.onReady = () => { clearTimeout(t); bridge.onReady = null; resolve(); };
+  });
+}
+// 보이지 않는 틀: Google 로그인이 되어 있으면 몇 초 안에 연결된다
+async function connectFrame() {
+  if (bridgeAlive()) return true;
+  const f = document.createElement('iframe');
+  f.src = bridgeUrl('frame');
+  f.title = '저장 창구';
+  f.className = 'bridge-frame';
+  f.setAttribute('aria-hidden', 'true');
+  document.body.append(f);
+  try { await waitBridge(12000); bridge.frame = f; return true; } catch { f.remove(); return false; }
+}
+// 로그인 작은 창: 버튼을 누른 그 순간에 열어야 브라우저가 막지 않는다
+function connectPopup() {
+  bridge.popup = window.open(bridgeUrl('popup'), 'wb-bridge', 'width=460,height=640');
+  if (!bridge.popup) return Promise.reject(new Error('팝업이 막혀 있습니다. 주소창 오른쪽에서 이 사이트의 팝업을 허용해 주세요'));
+  return waitBridge(180000);
+}
+function bridgeCall(req) {
+  if (!bridgeAlive()) return Promise.reject(Object.assign(new Error('Google 로그인 연결이 끊겼습니다. 다시 저장을 눌러 주세요'), { needLogin: true }));
+  const id = ++bridge.seq;
+  return new Promise((resolve, reject) => {
+    const t = setTimeout(() => { bridge.waits.delete(id); reject(new Error('저장 창구가 응답하지 않습니다. 잠시 후 다시 시도하세요')); }, 30000);
+    bridge.waits.set(id, (r) => { clearTimeout(t); if (r && r.ok === false) reject(new Error(r.error || '저장하지 못했습니다')); else resolve(r); });
+    bridge.win.postMessage({ wb: 'req', id, req }, bridge.origin);
   });
 }
 async function loadRelay() {
-  const [snap, ops] = await Promise.all([relayCall('GET', 'snapshot'), relayCall('GET', 'ops')]);
+  const r = await bridgeCall({ action: 'load' });
+  let snap = null;
+  try { snap = JSON.parse(r.snapshot || '{}'); } catch { snap = null; }
   // PC가 아직 한 번도 올리지 않았으면 공개 데이터(data.json)에서 시작
   const full = snap && Array.isArray(snap.tasks) ? snap : { ...SITE, id_map: {}, remote_errors: [] };
-  REMOTE = { open: true, full, ops: (Array.isArray(ops) ? ops : []).map((op) => ({ name: op.qid, op })), base: null };
+  REMOTE = { open: true, full, ops: (Array.isArray(r.ops) ? r.ops : []).map((op) => ({ name: op.qid, op })), base: null };
   rebuildRemote();
+}
+// 로그인 안 된 브라우저에서 저장하려 할 때: Google 로그인 창 → 연결되면 하던 일을 이어서
+function loginAndEdit(fn) {
+  const wait = connectPopup();
+  toast('Google 로그인 창에서 로그인하면 바로 이어집니다');
+  wait.then(async () => {
+    await loadRelay();
+    await bootRemote();
+    toast('연결됨 — 이제 바로 저장됩니다');
+    if (fn) fn();
+  }).catch(toastErr);
 }
 
 async function bootRemote() {
@@ -2809,11 +2783,11 @@ function mailNoteModal(id) {
   render();
 }
 
-// 공개 페이지에서 처음 저장할 때만 저장 키를 묻고, 그 뒤로는 바로 저장
+// 공개 페이지: Google 로그인이 되어 있으면 바로 저장, 아니면 저장할 때 로그인 창을 띄운다
 function requireEdit(fn) {
-  if (S.mode === 'open' && !store.get('wbDeviceOk', false)) return ensureDevice().then(fn, (e) => { if (!e?.cancelled) toastErr(e); });
+  if (S.mode === 'open' && !bridgeAlive()) return loginAndEdit(fn);
   if (S.mode !== 'static') return fn();
-  if (SITE?.relay_url) return toast('저장 창구에 연결하지 못해 지금은 보기만 됩니다. 잠시 후 새로고침하세요', { err: true });
+  if (SITE?.relay_url) return loginAndEdit(fn);
   if (!SITE?.data_repo) return toast('아직 저장 연결 전이라 지금은 보기만 됩니다', { err: true });
   remoteConnectModal({ then: fn });
 }
@@ -2950,7 +2924,8 @@ async function boot() {
   if (STATIC) {
     try {
       await staticApi('GET', '/api/me');
-      if (SITE.relay_url) { await loadRelay(); return await bootRemote(); }
+      // Google 로그인이 되어 있으면 바로 수정 모드, 아니면 보기 모드 (저장하려 할 때 로그인 창)
+      if (SITE.relay_url && await connectFrame()) { await loadRelay(); return await bootRemote(); }
     } catch (e) {
       REMOTE_ON = false;
       setTimeout(() => toast(`저장 창구 연결 실패: ${e.message} — 보기 모드로 엽니다`, { err: true }), 800);
