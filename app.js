@@ -313,7 +313,7 @@ function renderSide() {
     <div class="side-foot">
       ${S.mode === 'static'
         ? html`<div class="who"><b>${S.me.display_name || '업무 게시판'}</b><span class="muted small">읽기 전용 · ${fmtTs(S.generatedAt)} 게시</span></div>`
-        : html`<div class="who"><b>${S.me.display_name}</b><span class="muted small">${owner ? (S.mode === 'local' ? '내 PC에서 편집' : S.mode === 'remote' ? 'GitHub 페이지에서 편집 중' : S.mode === 'open' ? '누구나 바로 수정할 수 있는 페이지' : '편집') : '열람 전용'}</span></div>
+        : html`<div class="who"><b>${S.me.display_name}</b><span class="muted small">${owner ? (S.mode === 'local' ? '내 PC에서 편집' : S.mode === 'remote' ? 'GitHub 페이지에서 편집 중' : S.mode === 'open' ? 'Google 로그인으로 수정 중' : '편집') : '열람 전용'}</span></div>
           ${remoteStatusLine()}
           ${S.mode === 'remote' ? html`<button type="button" class="link small" id="remote-off">이 기기 편집 모드 끄기</button>` : ''}
           ${S.canPublish ? html`<button type="button" class="publish-btn" id="publish">GitHub에 게시</button>` : ''}
