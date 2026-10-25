@@ -1186,10 +1186,10 @@ function calendarRange(mode, month, anchor) {
   if (mode === 'month') {
     const [y, m] = month.split('-').map(Number);
     const first = month + '-01';
-    const offset = (dowOf(first) + 6) % 7;
+    const offset = dowOf(first);
     return { start: addDaysStr(first, -offset), weeks: Math.ceil((offset + new Date(Date.UTC(y, m, 0)).getUTCDate()) / 7) };
   }
-  return { start: addDaysStr(anchor, -((dowOf(anchor) + 6) % 7)), weeks: 2 };
+  return { start: addDaysStr(anchor, -dowOf(anchor)), weeks: 2 };
 }
 function dailyPlanBox(date) {
   const rows = dailyPlan(date);
@@ -1334,7 +1334,7 @@ function renderCalendar() {
       </div>
       <div class="cal">
         <div class="cal-board">
-          <div class="cal-week">${[1, 2, 3, 4, 5, 6, 0].map((i) => html`<div class="cal-dow dow-${i}">${WEEK[i]}</div>`)}</div>
+          <div class="cal-week">${[0, 1, 2, 3, 4, 5, 6].map((i) => html`<div class="cal-dow dow-${i}">${WEEK[i]}</div>`)}</div>
           <div class="cal-weeks">${weekRows}</div>
         </div>
         <aside class="cal-side">
