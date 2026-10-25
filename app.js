@@ -1182,6 +1182,79 @@ function saveDailyPlan(date, rows) {
     return false;
   }
 }
+function reorderDailyPlan(rows, id, targetId, after = false) {
+  const from = rows.findIndex((t) => t.id === id);
+  if (from < 0 || id === targetId || !rows.some((t) => t.id === targetId)) return rows;
+  const next = [...rows];
+  const [item] = next.splice(from, 1);
+  const to = next.findIndex((t) => t.id === targetId) + (after ? 1 : 0);
+  next.splice(to, 0, item);
+  return next.every((t, i) => t === rows[i]) ? rows : next;
+}
+function bindDailyPlanOrder(list, date) {
+  let drag = null;
+  const clear = () => {
+    const current = drag;
+    drag = null;
+    list.querySelectorAll('.daily-dragging, .daily-drop-before, .daily-drop-after')
+      .forEach((el) => el.classList.remove('daily-dragging', 'daily-drop-before', 'daily-drop-after'));
+    if (current?.handle.hasPointerCapture(current.pointerId)) current.handle.releasePointerCapture(current.pointerId);
+  };
+  const commit = (id, targetId, after) => {
+    const rows = dailyPlan(date);
+    const next = reorderDailyPlan(rows, id, targetId, after);
+    if (next === rows || !saveDailyPlan(date, next)) return;
+    renderCalendar();
+    [...document.querySelectorAll('[data-daily-drag]')].find((el) => el.dataset.dailyDrag === id)?.focus();
+    toast('할 일 순서를 저장했습니다.');
+  };
+  list.addEventListener('pointerdown', (e) => {
+    const handle = e.target.closest('[data-daily-drag]');
+    if (!handle || e.button !== 0 || !e.isPrimary || drag) return;
+    e.preventDefault();
+    handle.focus({ preventScroll: true });
+    drag = { id: handle.dataset.dailyDrag, handle, pointerId: e.pointerId, x: e.clientX, y: e.clientY, target: null };
+    handle.setPointerCapture(e.pointerId);
+  });
+  list.addEventListener('pointermove', (e) => {
+    if (!drag || drag.pointerId !== e.pointerId) return;
+    if (!drag.moved && Math.hypot(e.clientX - drag.x, e.clientY - drag.y) < 5) return;
+    drag.moved = true;
+    drag.handle.closest('[data-daily-id]').classList.add('daily-dragging');
+    list.querySelectorAll('.daily-drop-before, .daily-drop-after')
+      .forEach((el) => el.classList.remove('daily-drop-before', 'daily-drop-after'));
+    const target = document.elementFromPoint(e.clientX, e.clientY)?.closest('[data-daily-id]');
+    drag.target = null;
+    if (!target || !list.contains(target) || target.dataset.dailyId === drag.id) return;
+    const rect = target.getBoundingClientRect();
+    drag.target = target.dataset.dailyId;
+    drag.after = e.clientY >= rect.top + rect.height / 2;
+    target.classList.add(drag.after ? 'daily-drop-after' : 'daily-drop-before');
+  });
+  list.addEventListener('pointerup', (e) => {
+    if (!drag || drag.pointerId !== e.pointerId) return;
+    const current = drag;
+    clear();
+    if (current.moved && current.target) commit(current.id, current.target, current.after);
+  });
+  for (const type of ['pointercancel', 'lostpointercapture']) {
+    list.addEventListener(type, (e) => { if (drag?.pointerId === e.pointerId) clear(); });
+  }
+  list.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && drag) { e.preventDefault(); e.stopPropagation(); clear(); return; }
+    const handle = e.target.closest('[data-daily-drag]');
+    if (!handle || !['ArrowUp', 'ArrowDown'].includes(e.key)) return;
+    e.preventDefault();
+    e.stopPropagation();
+    if (drag) clear();
+    const rows = dailyPlan(date);
+    const from = rows.findIndex((t) => t.id === handle.dataset.dailyDrag);
+    const down = e.key === 'ArrowDown';
+    const target = rows[from + (down ? 1 : -1)];
+    if (target) commit(handle.dataset.dailyDrag, target.id, down);
+  });
+}
+
 function calendarRange(mode, month, anchor) {
   if (mode === 'month') {
     const [y, m] = month.split('-').map(Number);
@@ -1200,7 +1273,8 @@ function dailyPlanBox(date) {
         <p class="small muted">이 브라우저에 저장 · 다른 기기와 동기화되지 않음</p></div>
       <span class="daily-count" role="status" aria-live="polite">완료 ${done} / ${rows.length}</span>
     </header>
-    <ul class="daily-plan-list">${rows.map((t) => html`<li>
+    <ul class="daily-plan-list">${rows.map((t) => html`<li data-daily-id="${t.id}">
+      <button type="button" class="icon-btn daily-plan-drag" data-daily-drag="${t.id}" aria-label="${t.text} 순서 변경" title="끌어서 순서 변경 · 키보드 위/아래 화살표"><span aria-hidden="true">⠿</span></button>
       <label class="daily-plan-label"><input type="checkbox" data-daily-toggle="${t.id}" ${t.done ? raw('checked') : ''}>
         <span class="${t.done ? 'del' : ''}">${t.text}</span></label>
       <button type="button" class="ghost sm" data-daily-edit="${t.id}" aria-label="${t.text} 수정" title="할 일 수정">수정</button>
@@ -1215,6 +1289,7 @@ function dailyPlanBox(date) {
   </section>`;
 }
 function bindDailyPlan(root, date) {
+  bindDailyPlanOrder(root.querySelector('.daily-plan-list'), date);
   root.querySelector('[data-daily-form]').addEventListener('submit', (e) => {
     e.preventDefault();
     const text = e.target.elements.text.value.trim();

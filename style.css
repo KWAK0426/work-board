@@ -862,3 +862,14 @@ code { font-family: ui-monospace, Consolas, monospace; font-size: 12px; backgrou
   .daily-plan-head p { max-width: 245px; line-height: 1.5; }
   .daily-day-count { font-size: 10px; }
 }
+
+/* Daily checklist order: the handle leaves checkbox and edit clicks untouched. */
+.daily-plan-list li { position: relative; }
+.daily-plan-drag { flex: 0 0 32px; width: 32px; height: 44px; padding: 0; cursor: grab; touch-action: none; user-select: none; -webkit-user-select: none; color: var(--muted); }
+.daily-plan-drag span { font-size: 24px; line-height: 1; }
+.daily-plan-drag:active, .daily-dragging .daily-plan-drag { cursor: grabbing; }
+.daily-plan-list .daily-dragging { opacity: 0.45; }
+.daily-drop-before::before, .daily-drop-after::after { content: ""; position: absolute; left: 0; right: 0; height: 3px; background: var(--accent); pointer-events: none; }
+.daily-drop-before::before { top: 0; }
+.daily-drop-after::after { bottom: 0; }
+@media (max-width: 760px) { .daily-plan-list li { gap: 6px; } }
