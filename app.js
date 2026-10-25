@@ -50,7 +50,8 @@ const S = {
   page: 'calendar', pageArg: null,
   view: { chip: 'all', q: '', group: store.get('group', 'due'), showClosed: false },
   collapsed: new Set(store.get('collapsed', [])),
-  cal: { month: null, selected: null },
+  cal: { month: null, selected: null, mode: 'fortnight', anchor: null },
+  dailyPlans: store.get('dailyPlansV1', null),
   cand: { currentId: null, skipped: new Set() },
   peek: null, peekData: null, peekKind: null, replyForm: null,
   events: [], eventTypes: [], calDrag: null, calJustDragged: false,
@@ -1156,6 +1157,92 @@ function weekLayout(weekStart) {
 }
 const MAX_LANES = 3;
 
+// 일일 할 일은 마감 업무·일정과 별개이며 이 브라우저에만 저장한다.
+const DAILY_PLAN_KEY = 'wb.dailyPlansV1';
+const DAILY_PLAN_SEED = {
+  '2026-10-26': [
+    { id: '20261026-1', text: '주재정 과장님(엠지아이티)께 드론 엔터프라이즈 등록 가능 여부 확인', done: false },
+    { id: '20261026-2', text: '날짜별 모자이크 영상 생성 및 HTML 완성', done: false },
+    { id: '20261026-3', text: '이번 주 교수님 미팅에 가져갈 자료 정리', done: false },
+    { id: '20261026-4', text: '10월 28일 제출 과제 마무리', done: false },
+  ],
+};
+function dailyPlan(date) {
+  const rows = S.dailyPlans?.[date] ?? DAILY_PLAN_SEED[date] ?? [];
+  return Array.isArray(rows) ? rows.filter((t) => t && typeof t.id === 'string' && typeof t.text === 'string') : [];
+}
+function saveDailyPlan(date, rows) {
+  const plans = { ...(S.dailyPlans ?? DAILY_PLAN_SEED), [date]: rows };
+  try {
+    localStorage.setItem(DAILY_PLAN_KEY, JSON.stringify(plans));
+    S.dailyPlans = plans;
+    return true;
+  } catch {
+    toast('할 일을 저장하지 못했습니다. 브라우저 저장 공간·권한을 확인하세요.', { err: true });
+    return false;
+  }
+}
+function calendarRange(mode, month, anchor) {
+  if (mode === 'month') {
+    const [y, m] = month.split('-').map(Number);
+    const first = month + '-01';
+    const offset = (dowOf(first) + 6) % 7;
+    return { start: addDaysStr(first, -offset), weeks: Math.ceil((offset + new Date(Date.UTC(y, m, 0)).getUTCDate()) / 7) };
+  }
+  return { start: addDaysStr(anchor, -((dowOf(anchor) + 6) % 7)), weeks: 2 };
+}
+function dailyPlanBox(date) {
+  const rows = dailyPlan(date);
+  const done = rows.filter((t) => t.done).length;
+  return html`<section class="daily-plan" aria-labelledby="daily-plan-title">
+    <header class="daily-plan-head">
+      <div><h2 id="daily-plan-title">${fmtDate(date)} · ${date === S.today ? '오늘 할 일' : '할 일'}</h2>
+        <p class="small muted">이 브라우저에 저장 · 다른 기기와 동기화되지 않음</p></div>
+      <span class="daily-count" role="status" aria-live="polite">완료 ${done} / ${rows.length}</span>
+    </header>
+    <ul class="daily-plan-list">${rows.map((t) => html`<li>
+      <label class="daily-plan-label"><input type="checkbox" data-daily-toggle="${t.id}" ${t.done ? raw('checked') : ''}>
+        <span class="${t.done ? 'del' : ''}">${t.text}</span></label>
+      <button type="button" class="icon-btn" data-daily-delete="${t.id}" aria-label="${t.text} 삭제" title="할 일 삭제">×</button>
+    </li>`)}</ul>
+    ${rows.length ? '' : html`<p class="small muted">등록된 할 일이 없습니다.</p>`}
+    <form class="daily-plan-add" data-daily-form>
+      <label class="sr-only" for="daily-plan-input">선택한 날짜의 새 할 일</label>
+      <input id="daily-plan-input" name="text" maxlength="200" required autocomplete="off" placeholder="할 일 추가">
+      <button type="submit" class="primary">추가</button>
+    </form>
+  </section>`;
+}
+function bindDailyPlan(root, date) {
+  root.querySelector('[data-daily-form]').addEventListener('submit', (e) => {
+    e.preventDefault();
+    const text = e.target.elements.text.value.trim();
+    if (!text) return;
+    const id = crypto.randomUUID();
+    if (saveDailyPlan(date, [...dailyPlan(date), { id, text, done: false }])) {
+      renderCalendar();
+      document.querySelector('#daily-plan-input')?.focus();
+    }
+  });
+  root.querySelector('.daily-plan').addEventListener('change', (e) => {
+    const input = e.target.closest('[data-daily-toggle]');
+    if (!input) return;
+    const rows = dailyPlan(date).map((t) => t.id === input.dataset.dailyToggle ? { ...t, done: input.checked } : t);
+    if (saveDailyPlan(date, rows)) {
+      renderCalendar();
+      [...document.querySelectorAll('[data-daily-toggle]')].find((el) => el.dataset.dailyToggle === input.dataset.dailyToggle)?.focus();
+    } else input.checked = !input.checked;
+  });
+  root.querySelector('.daily-plan').addEventListener('click', (e) => {
+    const button = e.target.closest('[data-daily-delete]');
+    if (!button) return;
+    if (confirm('이 할 일을 삭제할까요? 완료 표시만 하려면 체크박스를 사용하세요.')) {
+      if (saveDailyPlan(date, dailyPlan(date).filter((t) => t.id !== button.dataset.dailyDelete))) renderCalendar();
+    }
+  });
+}
+
+
 function renderCalendar() {
   const owner = isOwner() && S.mode !== 'static';
   // 공개 페이지에서도 일정 '추가'·'수정'은 누구나
@@ -1163,11 +1250,9 @@ function renderCalendar() {
   if (!S.cal.month) S.cal.month = S.today.slice(0, 7);
   if (!S.cal.selected) S.cal.selected = S.today;
   const [y, mo] = S.cal.month.split('-').map(Number);
-  const first = `${S.cal.month}-01`;
-  const firstDow = dowOf(first);
-  const daysInMonth = new Date(Date.UTC(y, mo, 0)).getUTCDate();
-  const start = addDaysStr(first, -firstDow);
-  const weeks = Math.ceil((firstDow + daysInMonth) / 7);
+  S.cal.anchor ??= S.today;
+  const { start, weeks } = calendarRange(S.cal.mode, S.cal.month, S.cal.anchor);
+  const end = addDaysStr(start, weeks * 7 - 1);
   const taskMap = calendarEvents();
   const byDate = mailsByDate();
   const undated = activeTasks().filter((t) => !t.my_due_date).sort((a, b) => (URGENCY_RANK[a.my_urgency] ?? 9) - (URGENCY_RANK[b.my_urgency] ?? 9));
@@ -1178,11 +1263,11 @@ function renderCalendar() {
     const days = [0, 1, 2, 3, 4, 5, 6].map((i) => addDaysStr(ws, i));
     const placed = weekLayout(ws);
     const hidden = days.map((_, i) => placed.filter((p) => p.lane >= MAX_LANES && p.s <= i && p.t >= i).length);
-    const cls = (d, i) => `c${i + 1} dow-${i} ${d.slice(0, 7) === S.cal.month ? '' : 'out'} ${d === S.today ? 'today' : ''} ${d === S.cal.selected ? 'sel' : ''}`;
+    const cls = (d, i) => `c${i + 1} dow-${dowOf(d)} ${S.cal.mode !== 'month' || d.slice(0, 7) === S.cal.month ? '' : 'out'} ${d === S.today ? 'today' : ''} ${d === S.cal.selected ? 'sel' : ''}`;
     weekRows.push(html`<div class="wk">
       ${days.map((d, i) => html`<div class="cal-bg ${cls(d, i)}" data-date="${d}"></div>`)}
       ${days.map((d, i) => html`<div class="cal-dh ${cls(d, i)}" data-date="${d}">
-        <button type="button" class="num" data-sel="${d}" aria-label="${fmtDate(d)}">${Number(d.slice(8))}</button>${mailDots(d, byDate)}
+        <button type="button" class="num" data-sel="${d}" aria-label="${fmtDate(d)}" aria-pressed="${d === S.cal.selected}">${Number(d.slice(8))}</button>${dailyPlan(d).length ? html`<span class="daily-day-count" title="할 일 완료 ${dailyPlan(d).filter((t) => t.done).length}/${dailyPlan(d).length}">${dailyPlan(d).filter((t) => t.done).length}/${dailyPlan(d).length}</span>` : ''}${mailDots(d, byDate)}
         ${editable && d === S.cal.selected ? html`<button type="button" class="sel-add" data-new-event="${d}" title="${fmtDate(d)}에 일정 추가">+ 추가</button>` : ''}</div>`)}
       ${placed.filter((p) => p.lane < MAX_LANES).map((p) => html`<a href="#" class="ev-bar c${p.s + 1} s${p.t - p.s + 1} l${p.lane + 1} ${p.contL ? 'cont-l' : ''} ${p.contR ? 'cont-r' : ''}"
           data-event="${p.e.id}" data-ec="${typeOf(p.e).color}" title="${typeOf(p.e).name} · ${p.e.title} · ${eventWhen(p.e)}${p.e.location ? ` · ${p.e.location}` : ''}">${p.e.title}</a>`)}
@@ -1227,11 +1312,15 @@ function renderCalendar() {
   mount(main(), html`
     <div class="page wide">
       <header class="page-h cal-h">
-        <h1>${y}년 ${mo}월</h1>
+        <h1>${S.cal.mode === 'month' ? `${y}년 ${mo}월` : `${fmtDate(start)} ~ ${fmtDate(end)}`}</h1>
+        <div class="cal-view-toggle" role="group" aria-label="달력 보기">
+          <button type="button" class="ghost ${S.cal.mode === 'fortnight' ? 'on' : ''}" data-cal-view="fortnight" aria-pressed="${S.cal.mode === 'fortnight'}">2주 보기</button>
+          <button type="button" class="ghost ${S.cal.mode === 'month' ? 'on' : ''}" data-cal-view="month" aria-pressed="${S.cal.mode === 'month'}">월별 보기</button>
+        </div>
         <div class="cal-nav">
-          <button type="button" class="ghost" data-month="-1" aria-label="이전 달">‹</button>
+          <button type="button" class="ghost" data-month="-1" aria-label="${S.cal.mode === 'month' ? '이전 달' : '이전 2주'}">‹</button>
           <button type="button" class="ghost" data-month="0">오늘</button>
-          <button type="button" class="ghost" data-month="1" aria-label="다음 달">›</button>
+          <button type="button" class="ghost" data-month="1" aria-label="${S.cal.mode === 'month' ? '다음 달' : '다음 2주'}">›</button>
         </div>
         <span class="spacer"></span>
         ${owner ? html`<button type="button" class="primary" data-new-event="${sel}">+ 일정</button>` : ''}
@@ -1245,7 +1334,7 @@ function renderCalendar() {
       </div>
       <div class="cal">
         <div class="cal-board">
-          <div class="cal-week">${WEEK.map((w, i) => html`<div class="cal-dow dow-${i}">${w}</div>`)}</div>
+          <div class="cal-week">${[1, 2, 3, 4, 5, 6, 0].map((i) => html`<div class="cal-dow dow-${i}">${WEEK[i]}</div>`)}</div>
           <div class="cal-weeks">${weekRows}</div>
         </div>
         <aside class="cal-side">
@@ -1266,16 +1355,36 @@ function renderCalendar() {
           </section>` : ''}
         </aside>
       </div>
+      ${dailyPlanBox(sel)}
     </div>`);
 
   const root = $('#main .page');
+  bindDailyPlan(root, sel);
   root.addEventListener('click', (e) => {
     if (S.calJustDragged) { S.calJustDragged = false; return; }
+    const view = e.target.closest('[data-cal-view]');
+    if (view) {
+      S.cal.mode = view.dataset.calView;
+      S.cal.month = S.cal.selected.slice(0, 7);
+      S.cal.anchor = S.cal.selected;
+      return renderCalendar();
+    }
     const m = e.target.closest('[data-month]');
     if (m) {
       const n = Number(m.dataset.month);
-      S.cal.month = n === 0 ? S.today.slice(0, 7) : shiftMonth(S.cal.month, n);
-      if (n === 0) S.cal.selected = S.today;
+      if (n === 0) {
+        S.cal.month = S.today.slice(0, 7);
+        S.cal.anchor = S.today;
+        S.cal.selected = S.today;
+      } else if (S.cal.mode === 'month') {
+        S.cal.month = shiftMonth(S.cal.month, n);
+        S.cal.selected = S.cal.month + '-01';
+        S.cal.anchor = S.cal.selected;
+      } else {
+        S.cal.anchor = addDaysStr(start, n * 14);
+        S.cal.selected = S.cal.anchor;
+        S.cal.month = S.cal.selected.slice(0, 7);
+      }
       return renderCalendar();
     }
     const ne = e.target.closest('[data-new-event]');
@@ -1293,7 +1402,7 @@ function renderCalendar() {
       const d = cell.dataset.sel || cell.dataset.date;
       S.cal.selected = d;
       renderCalendar();
-      if (isPhone()) $('.cal-side')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      if (isPhone()) $('.daily-plan')?.scrollIntoView({ behavior: 'smooth', block: 'start' });
     }
   });
   if (!owner) return;
