@@ -1203,6 +1203,7 @@ function dailyPlanBox(date) {
     <ul class="daily-plan-list">${rows.map((t) => html`<li>
       <label class="daily-plan-label"><input type="checkbox" data-daily-toggle="${t.id}" ${t.done ? raw('checked') : ''}>
         <span class="${t.done ? 'del' : ''}">${t.text}</span></label>
+      <button type="button" class="ghost sm" data-daily-edit="${t.id}" aria-label="${t.text} 수정" title="할 일 수정">수정</button>
       <button type="button" class="icon-btn" data-daily-delete="${t.id}" aria-label="${t.text} 삭제" title="할 일 삭제">×</button>
     </li>`)}</ul>
     ${rows.length ? '' : html`<p class="small muted">등록된 할 일이 없습니다.</p>`}
@@ -1234,6 +1235,8 @@ function bindDailyPlan(root, date) {
     } else input.checked = !input.checked;
   });
   root.querySelector('.daily-plan').addEventListener('click', (e) => {
+    const edit = e.target.closest('[data-daily-edit]');
+    if (edit) return editDailyPlan(date, edit.dataset.dailyEdit);
     const button = e.target.closest('[data-daily-delete]');
     if (!button) return;
     if (confirm('이 할 일을 삭제할까요? 완료 표시만 하려면 체크박스를 사용하세요.')) {
@@ -1242,6 +1245,33 @@ function bindDailyPlan(root, date) {
   });
 }
 
+
+function editDailyPlan(date, id) {
+  const item = dailyPlan(date).find((t) => t.id === id);
+  if (!item) return;
+  const modal = openModal(html`<h2>할 일 수정</h2>
+    <p class="small muted">${fmtDate(date)}</p>
+    <form id="daily-edit-form">
+      <div class="field"><label>내용</label><input name="text" value="${item.text}" maxlength="200" required autocomplete="off"></div>
+      <div class="actions"><button type="button" class="ghost" data-cancel>취소</button><button type="submit" class="primary">저장</button></div>
+    </form>`);
+  const form = $('#daily-edit-form', modal);
+  const input = form.elements.text;
+  input.select();
+  input.addEventListener('input', () => input.setCustomValidity(''));
+  $('[data-cancel]', modal).addEventListener('click', closeModal);
+  form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const text = input.value.trim();
+    if (!text) { input.setCustomValidity('내용을 입력하세요.'); input.reportValidity(); return; }
+    const rows = dailyPlan(date).map((t) => t.id === id ? { ...t, text } : t);
+    if (saveDailyPlan(date, rows)) {
+      closeModal();
+      renderCalendar();
+      [...document.querySelectorAll('[data-daily-edit]')].find((el) => el.dataset.dailyEdit === id)?.focus();
+    }
+  });
+}
 
 function renderCalendar() {
   const owner = isOwner() && S.mode !== 'static';
